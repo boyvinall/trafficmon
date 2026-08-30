@@ -3,9 +3,9 @@
 A `nethogs`-style TUI for macOS: live network traffic grouped by **process** or
 by **destination**, with drill-down between the two.
 
-> **Status: scaffold.** The package structure, CLI and UI shell are in place;
-> the capture, attribution and aggregation logic are stubbed. Grep for
-> `TODO(milestone` to find what remains.
+Traffic is attributed to processes by joining live packet counters against
+the kernel's socket table, so it shows which process is using bandwidth, not
+just how much is flowing.
 
 ## Requirements
 
@@ -38,6 +38,8 @@ a live pcap handle, and reading other processes' socket fd info via `libproc`.
 | Key | Action |
 |-----|--------|
 | `↑`/`k`, `↓`/`j` | Move selection |
+| `PgUp`/`Ctrl-B`, `PgDn`/`Ctrl-F` | Move a screenful |
+| `Home`, `End`/`G` | Jump to first/last row |
 | `Tab` | Toggle mode (process ↔ destination) |
 | `Enter` | Drill into the selected row |
 | `Esc`/`Backspace` | Pop the drill-down stack |
