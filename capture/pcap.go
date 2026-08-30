@@ -2,12 +2,28 @@ package capture
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/gopacket/gopacket/pcap"
+	"golang.org/x/sync/errgroup"
 )
+
+// bpfFilter keeps the kernel from handing us anything we cannot attribute to a
+// socket: only IPv4/IPv6 carrying TCP or UDP survives it.
+const bpfFilter = "(ip or ip6) and (tcp or udp)"
+
+// readTimeout bounds how long one read blocks inside libpcap.
+//
+// pcap.BlockForever would park the reader in libpcap while holding the
+// handle's mutex, so a Close from another goroutine could not interrupt it and
+// a quiet interface would keep Run alive long past ctx being cancelled. A
+// short timeout lets the loop come up for air and check ctx instead.
+const readTimeout = 250 * time.Millisecond
 
 // Config controls live packet capture.
 type Config struct {
@@ -43,13 +59,110 @@ func New(cfg Config) *Capturer {
 	}
 }
 
-// Run opens the interface and decodes packets until ctx is cancelled.
-//
-// TODO(milestone 1): pcap.OpenLive, set the BPF filter to "ip and (tcp or
-// udp)", then decode each packet to a FlowKey and feed the ByteCounter.
+// Run opens the interface and decodes packets into the flow table until ctx is
+// cancelled, at which point it returns ctx.Err().
 func (c *Capturer) Run(ctx context.Context) error {
-	<-ctx.Done()
-	return ctx.Err()
+	ifaces := []string{c.cfg.Interface}
+	if c.cfg.IncludeLoopback && c.cfg.Interface != loopbackInterface {
+		// Loopback traffic never reaches the primary interface, so it needs a
+		// handle of its own feeding the same flow map.
+		ifaces = append(ifaces, loopbackInterface)
+	}
+
+	locals, err := localAddrSet(ifaces)
+	if err != nil {
+		return err
+	}
+	isLocal := func(a netip.Addr) bool {
+		_, found := locals[a]
+		return found
+	}
+
+	g, ctx := errgroup.WithContext(ctx)
+	for _, iface := range ifaces {
+		g.Go(func() error { return c.captureOn(ctx, iface, isLocal) })
+	}
+	return g.Wait()
+}
+
+// captureOn drives one pcap handle. It owns that handle for its whole life, so
+// nothing else can close it out from under the read in progress.
+func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(netip.Addr) bool) error {
+	// Promiscuous mode stays off: we only want traffic this host is an
+	// endpoint of, and anything else would be attributed to no local socket.
+	handle, err := pcap.OpenLive(iface, int32(c.cfg.SnapLen), false, readTimeout)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", iface, err)
+	}
+	defer handle.Close()
+
+	if err := handle.SetBPFFilter(bpfFilter); err != nil {
+		return fmt.Errorf("set filter on %s: %w", iface, err)
+	}
+
+	dec, err := newFlowDecoder(handle.LinkType())
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", iface, err)
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Zero-copy is safe here because everything kept from the packet —
+		// addresses, ports, lengths — is copied into values before the next
+		// read invalidates the buffer.
+		data, ci, err := handle.ZeroCopyReadPacketData()
+		switch {
+		case err == nil:
+		case errors.Is(err, pcap.NextErrorTimeoutExpired):
+			continue
+		case errors.Is(err, io.EOF):
+			return fmt.Errorf("capture on %s ended", iface)
+		default:
+			return fmt.Errorf("read from %s: %w", iface, err)
+		}
+
+		info, ok := dec.decode(data)
+		if !ok {
+			continue
+		}
+		key, inbound, ok := normalise(info.Src, info.Dst, info.SrcPort, info.DstPort, info.Proto, isLocal)
+		if !ok {
+			continue
+		}
+
+		// libpcap timestamps come from the kernel at capture time, which is
+		// closer to when the bytes moved than any clock read here would be.
+		ts := ci.Timestamp
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		c.record(key, ts, info.Bytes, inbound)
+	}
+}
+
+// record credits n bytes to a flow, creating its counter on first sight. The
+// map lock is released before the counter is touched so that a Snapshot never
+// waits on per-flow bookkeeping.
+func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) {
+	c.mu.RLock()
+	ctr := c.flows[key]
+	c.mu.RUnlock()
+
+	if ctr == nil {
+		c.mu.Lock()
+		// Re-check: another interface's goroutine may have created it while
+		// the read lock was down.
+		if ctr = c.flows[key]; ctr == nil {
+			ctr = &ByteCounter{}
+			c.flows[key] = ctr
+		}
+		c.mu.Unlock()
+	}
+
+	ctr.Add(ts, n, inbound)
 }
 
 // Snapshot returns a point-in-time copy of every flow's counters, for the
@@ -94,22 +207,4 @@ func ListInterfaces() ([]string, error) {
 		names = append(names, d.Name)
 	}
 	return names, nil
-}
-
-// DefaultInterface resolves the interface backing the default route, mirroring
-// what `route get default` reports.
-//
-// TODO(milestone 1): parse the default route instead of taking the first
-// non-loopback device libpcap offers.
-func DefaultInterface() (string, error) {
-	names, err := ListInterfaces()
-	if err != nil {
-		return "", err
-	}
-	for _, n := range names {
-		if n != "lo0" {
-			return n, nil
-		}
-	}
-	return "", fmt.Errorf("no capturable interface found")
 }

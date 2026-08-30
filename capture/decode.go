@@ -1,0 +1,175 @@
+package capture
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net/netip"
+
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+)
+
+// ipv6HeaderLen is the size of the fixed IPv6 header. The IPv6 Length field
+// counts only what follows that header, unlike IPv4's, so it has to be added
+// back to get a datagram size comparable with IPv4's.
+const ipv6HeaderLen = 40
+
+// errShortTransport reports a transport header cut short by the snap length,
+// leaving no ports to read.
+var errShortTransport = errors.New("transport header too short for ports")
+
+// packetInfo is the slice of a packet the flow table cares about.
+type packetInfo struct {
+	Src     netip.Addr
+	Dst     netip.Addr
+	SrcPort uint16
+	DstPort uint16
+	Proto   Proto
+
+	// Bytes is the size of the whole IP datagram — IP header, transport
+	// header and payload — taken from the IP header's own length field.
+	//
+	// It deliberately is not the captured length: SnapLen is small enough
+	// that anything but a bare ACK arrives truncated, so len(data) would
+	// undercount badly. It also excludes link-layer framing, so the same
+	// connection totals the same whether it was seen over Ethernet or over
+	// the loopback pseudo-header.
+	Bytes uint64
+}
+
+// transportPorts is a minimal DecodingLayer for TCP and UDP that reads the
+// source and destination ports and stops.
+//
+// gopacket's own layers.TCP decoder fails a packet whose options run past the
+// captured bytes, which would silently drop long-header packets from the flow
+// table whenever SnapLen is tight. Only the first four bytes of either header
+// matter here, and those two layouts agree on them, so one decoder serves
+// both and truncation stops mattering.
+type transportPorts struct {
+	src uint16
+	dst uint16
+}
+
+// DecodeFromBytes implements gopacket.DecodingLayer.
+func (t *transportPorts) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
+	if len(data) < 4 {
+		df.SetTruncated()
+		return errShortTransport
+	}
+	t.src = binary.BigEndian.Uint16(data[0:2])
+	t.dst = binary.BigEndian.Uint16(data[2:4])
+	return nil
+}
+
+// CanDecode implements gopacket.DecodingLayer.
+func (t *transportPorts) CanDecode() gopacket.LayerClass {
+	return gopacket.NewLayerClass([]gopacket.LayerType{layers.LayerTypeTCP, layers.LayerTypeUDP})
+}
+
+// NextLayerType implements gopacket.DecodingLayer. There is nothing below the
+// ports worth decoding.
+func (t *transportPorts) NextLayerType() gopacket.LayerType { return gopacket.LayerTypeZero }
+
+// LayerPayload implements gopacket.DecodingLayer. Returning nothing ends the
+// parser's decode loop.
+func (t *transportPorts) LayerPayload() []byte { return nil }
+
+// flowDecoder turns raw capture bytes into a packetInfo. It reuses one set of
+// layer structs across every packet, so it must not be shared between the
+// per-interface capture goroutines.
+type flowDecoder struct {
+	eth   layers.Ethernet
+	loop  layers.Loopback
+	dot1q layers.Dot1Q
+	ip4   layers.IPv4
+	ip6   layers.IPv6
+	ports transportPorts
+
+	parser  *gopacket.DecodingLayerParser
+	decoded []gopacket.LayerType
+}
+
+// newFlowDecoder builds a decoder for the link type of one pcap handle.
+func newFlowDecoder(linkType layers.LinkType) (*flowDecoder, error) {
+	var first gopacket.LayerType
+	switch linkType {
+	case layers.LinkTypeEthernet:
+		first = layers.LayerTypeEthernet
+	case layers.LinkTypeNull, layers.LinkTypeLoop:
+		// lo0 and the utun tunnels carry a 4-byte address-family header
+		// instead of an Ethernet one.
+		first = layers.LayerTypeLoopback
+	case layers.LinkTypeRaw, layers.LinkTypeIPv4:
+		first = layers.LayerTypeIPv4
+	case layers.LinkTypeIPv6:
+		first = layers.LayerTypeIPv6
+	default:
+		return nil, fmt.Errorf("unsupported link type %s", linkType)
+	}
+
+	d := &flowDecoder{decoded: make([]gopacket.LayerType, 0, 4)}
+	d.parser = gopacket.NewDecodingLayerParser(first,
+		&d.eth, &d.loop, &d.dot1q, &d.ip4, &d.ip6, &d.ports)
+	// Anything with no decoder here — ICMP, ESP, an exotic IPv6 extension
+	// header — is not a flow we count, so stopping quietly beats erroring.
+	d.parser.IgnoreUnsupported = true
+
+	return d, nil
+}
+
+// decode extracts the 5-tuple and datagram size from one captured packet. It
+// reports false for anything that is not a complete-enough IP/TCP or IP/UDP
+// packet, which the caller should simply skip.
+func (d *flowDecoder) decode(data []byte) (packetInfo, bool) {
+	if err := d.parser.DecodeLayers(data, &d.decoded); err != nil {
+		return packetInfo{}, false
+	}
+
+	var (
+		info          packetInfo
+		haveNet       bool
+		haveTransport bool
+	)
+	for _, typ := range d.decoded {
+		switch typ {
+		case layers.LayerTypeIPv4:
+			src, okSrc := netip.AddrFromSlice(d.ip4.SrcIP)
+			dst, okDst := netip.AddrFromSlice(d.ip4.DstIP)
+			if !okSrc || !okDst {
+				return packetInfo{}, false
+			}
+			info.Src, info.Dst = src.Unmap(), dst.Unmap()
+			info.Bytes = uint64(d.ip4.Length)
+			haveNet = true
+
+		case layers.LayerTypeIPv6:
+			src, okSrc := netip.AddrFromSlice(d.ip6.SrcIP)
+			dst, okDst := netip.AddrFromSlice(d.ip6.DstIP)
+			if !okSrc || !okDst {
+				return packetInfo{}, false
+			}
+			info.Src, info.Dst = src.Unmap(), dst.Unmap()
+			info.Bytes = uint64(d.ip6.Length) + ipv6HeaderLen
+			haveNet = true
+
+		case layers.LayerTypeTCP:
+			info.Proto = ProtoTCP
+			haveTransport = true
+
+		case layers.LayerTypeUDP:
+			info.Proto = ProtoUDP
+			haveTransport = true
+		}
+	}
+
+	// A packet missing either half is unattributable: an IP-only packet has
+	// no ports to join a process on, and ports without addresses cannot be
+	// pointed at a peer.
+	if !haveNet || !haveTransport {
+		return packetInfo{}, false
+	}
+
+	info.SrcPort, info.DstPort = d.ports.src, d.ports.dst
+	return info, true
+}

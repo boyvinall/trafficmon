@@ -149,3 +149,37 @@ func (c *ByteCounter) LastSeen() time.Time {
 	defer c.mu.Unlock()
 	return c.lastSeen
 }
+
+// normalise folds a packet's 5-tuple onto the FlowKey that both directions of
+// the connection share, using isLocal to work out which endpoint is ours. It
+// reports whether the packet was inbound, and whether it could be attributed
+// at all.
+func normalise(src, dst netip.Addr, srcPort, dstPort uint16, proto Proto, isLocal func(netip.Addr) bool) (key FlowKey, inbound, ok bool) {
+	switch {
+	case isLocal(src):
+		// Source-local is tested first so that loopback traffic, where both
+		// ends are ours, lands on one row per local port rather than being
+		// counted once at each end of the same connection.
+		return FlowKey{
+			LocalAddr:  src,
+			LocalPort:  srcPort,
+			RemoteAddr: dst,
+			RemotePort: dstPort,
+			Proto:      proto,
+		}, false, true
+
+	case isLocal(dst):
+		return FlowKey{
+			LocalAddr:  dst,
+			LocalPort:  dstPort,
+			RemoteAddr: src,
+			RemotePort: srcPort,
+			Proto:      proto,
+		}, true, true
+
+	default:
+		// Neither end is ours: forwarded or multicast traffic that belongs to
+		// no local socket. Dropping it beats attributing it to the wrong one.
+		return FlowKey{}, false, false
+	}
+}

@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -76,5 +77,134 @@ func TestRateWindowMatchesBucketCount(t *testing.T) {
 	// constants must stay in step.
 	if time.Duration(rateBuckets)*time.Second != rateWindow {
 		t.Fatalf("rateBuckets (%d) does not cover rateWindow (%s)", rateBuckets, rateWindow)
+	}
+}
+
+// mustAddr parses a literal IP address for tests, failing loudly on a typo.
+func mustAddr(t *testing.T, s string) netip.Addr {
+	t.Helper()
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		t.Fatalf("netip.ParseAddr(%q): %v", s, err)
+	}
+	return addr
+}
+
+func TestNormalise(t *testing.T) {
+	local4 := mustAddr(t, "192.168.1.10")
+	local6 := mustAddr(t, "2001:db8::1")
+	loop4 := mustAddr(t, "127.0.0.1")
+	remote4 := mustAddr(t, "140.82.112.3")
+	remote6 := mustAddr(t, "2606:4700::1111")
+
+	locals := map[netip.Addr]struct{}{
+		local4: {},
+		local6: {},
+		loop4:  {},
+	}
+	isLocal := func(a netip.Addr) bool {
+		_, found := locals[a]
+		return found
+	}
+
+	tests := []struct {
+		name         string
+		src, dst     netip.Addr
+		sport, dport uint16
+		proto        Proto
+		wantKey      FlowKey
+		wantInbound  bool
+		wantOK       bool
+	}{
+		{
+			name: "outbound v4 puts our address in the local fields",
+			src:  local4, dst: remote4, sport: 51000, dport: 443, proto: ProtoTCP,
+			wantKey: FlowKey{LocalAddr: local4, LocalPort: 51000, RemoteAddr: remote4, RemotePort: 443, Proto: ProtoTCP},
+			wantOK:  true,
+		},
+		{
+			name: "inbound v4 folds onto the same key as the outbound half",
+			src:  remote4, dst: local4, sport: 443, dport: 51000, proto: ProtoTCP,
+			wantKey:     FlowKey{LocalAddr: local4, LocalPort: 51000, RemoteAddr: remote4, RemotePort: 443, Proto: ProtoTCP},
+			wantInbound: true,
+			wantOK:      true,
+		},
+		{
+			name: "outbound v6 udp",
+			src:  local6, dst: remote6, sport: 5353, dport: 53, proto: ProtoUDP,
+			wantKey: FlowKey{LocalAddr: local6, LocalPort: 5353, RemoteAddr: remote6, RemotePort: 53, Proto: ProtoUDP},
+			wantOK:  true,
+		},
+		{
+			name: "inbound v6 udp",
+			src:  remote6, dst: local6, sport: 53, dport: 5353, proto: ProtoUDP,
+			wantKey:     FlowKey{LocalAddr: local6, LocalPort: 5353, RemoteAddr: remote6, RemotePort: 53, Proto: ProtoUDP},
+			wantInbound: true,
+			wantOK:      true,
+		},
+		{
+			// Both ends are ours, so the source side wins and each endpoint
+			// gets its own row rather than the bytes being counted twice.
+			name: "loopback attributes to the sending side",
+			src:  loop4, dst: loop4, sport: 51000, dport: 8080, proto: ProtoTCP,
+			wantKey: FlowKey{LocalAddr: loop4, LocalPort: 51000, RemoteAddr: loop4, RemotePort: 8080, Proto: ProtoTCP},
+			wantOK:  true,
+		},
+		{
+			name: "neither end local is dropped",
+			src:  remote4, dst: mustAddr(t, "1.1.1.1"), sport: 1234, dport: 80, proto: ProtoTCP,
+			wantOK: false,
+		},
+		{
+			name: "multicast destination from a remote sender is dropped",
+			src:  remote4, dst: mustAddr(t, "224.0.0.251"), sport: 5353, dport: 5353, proto: ProtoUDP,
+			wantOK: false,
+		},
+		{
+			name: "multicast destination from us is still ours",
+			src:  local4, dst: mustAddr(t, "224.0.0.251"), sport: 5353, dport: 5353, proto: ProtoUDP,
+			wantKey: FlowKey{LocalAddr: local4, LocalPort: 5353, RemoteAddr: mustAddr(t, "224.0.0.251"), RemotePort: 5353, Proto: ProtoUDP},
+			wantOK:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, inbound, ok := normalise(tt.src, tt.dst, tt.sport, tt.dport, tt.proto, isLocal)
+			if ok != tt.wantOK {
+				t.Fatalf("normalise() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if key != tt.wantKey {
+				t.Errorf("normalise() key = %v, want %v", key, tt.wantKey)
+			}
+			if inbound != tt.wantInbound {
+				t.Errorf("normalise() inbound = %v, want %v", inbound, tt.wantInbound)
+			}
+		})
+	}
+}
+
+func TestNormaliseIsDirectionSymmetric(t *testing.T) {
+	local := mustAddr(t, "10.0.0.5")
+	remote := mustAddr(t, "93.184.216.34")
+	isLocal := func(a netip.Addr) bool { return a == local }
+
+	out, outInbound, ok := normalise(local, remote, 40000, 80, ProtoTCP, isLocal)
+	if !ok {
+		t.Fatal("normalise() dropped an outbound packet")
+	}
+	in, inInbound, ok := normalise(remote, local, 80, 40000, ProtoTCP, isLocal)
+	if !ok {
+		t.Fatal("normalise() dropped an inbound packet")
+	}
+
+	if out != in {
+		t.Fatalf("directions produced different keys: %v vs %v", out, in)
+	}
+	if outInbound || !inInbound {
+		t.Fatalf("direction flags = (%v, %v), want (false, true)", outInbound, inInbound)
 	}
 }
