@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/boyvinall/mac-nethogs/aggregate"
+import (
+	"strings"
+
+	"github.com/boyvinall/mac-nethogs/aggregate"
+)
 
 // Mode is a top-level view.
 type Mode uint8
@@ -66,12 +70,19 @@ func (s *Stack) Apply(snap aggregate.Snapshot) aggregate.Snapshot {
 	return snap
 }
 
-// Breadcrumb renders the drill path for the header bar.
+// Breadcrumb renders the drill path for the header bar, e.g.
+// "Process: Chrome (pid 4821) → Destinations".
 //
-// TODO(milestone 6): join the frame labels with " → ".
+// The bottom frame is the unfiltered top-level view, which the header already
+// names via the mode label, so it carries no label and contributes nothing.
+// That makes an empty result the signal for "not drilled in" and keeps the
+// header from showing a redundant "By Process → " prefix at depth 0.
 func (s *Stack) Breadcrumb() string {
-	if len(s.frames) == 1 {
-		return ""
+	labels := make([]string, 0, len(s.frames)-1)
+	for _, f := range s.frames[1:] {
+		if f.Label != "" {
+			labels = append(labels, f.Label)
+		}
 	}
-	return s.Top().Label
+	return strings.Join(labels, " → ")
 }
