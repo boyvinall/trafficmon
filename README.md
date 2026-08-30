@@ -44,7 +44,7 @@ a live pcap handle, and reading other processes' socket fd info via `libproc`.
 | `g` | (destination mode) toggle IP-only ↔ IP:port |
 | `s` | Cycle sort key |
 | `r` | Sort by live rate vs cumulative total |
-| `/` | Filter rows by substring |
+| `/` | Filter rows by substring of the process name, address or resolved hostname |
 | `p` | Pause/resume live updates |
 | `?` | Help overlay |
 | `q` | Quit |

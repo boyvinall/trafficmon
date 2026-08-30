@@ -344,7 +344,10 @@ func TestJoinEnds(t *testing.T) {
 }
 
 func TestViewDestinationMode(t *testing.T) {
-	m := newTestModel(destinationRows(), 100, 12)
+	// Wide enough that the address column does not have to truncate: it now
+	// shares the flexible width with the hostname beside it, and a clipped
+	// label would be a test about truncation rather than about the view.
+	m := newTestModel(destinationRows(), 120, 12)
 	m.stack.SetMode(ModeDestination)
 	m.grouping = aggregate.GroupByIPPort
 
@@ -758,7 +761,7 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 				// Set the model up so that every binding has something to act
 				// on: destinations at the finest grouping give g something to
 				// coarsen and leave three rows to move between, and a filter
-				// gives `/` something to clear.
+				// already in force gives `/` something to open over.
 				m := newLiveModel()
 				m.stack.SetMode(ModeDestination)
 				m.grouping = aggregate.GroupByIPPort
@@ -793,9 +796,9 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 // modelState is everything a keypress can observably change, rendered so that
 // a test can tell "the model reacted" from "the model did not".
 func modelState(m Model, cmd tea.Cmd) string {
-	return fmt.Sprintf("mode=%d grouping=%d sort=%s cursor=%d depth=%d rows=%v paused=%t help=%t filter=%q quit=%t",
+	return fmt.Sprintf("mode=%d grouping=%d sort=%s cursor=%d depth=%d rows=%v paused=%t help=%t filter=%q filtering=%t quit=%t",
 		m.stack.Top().Mode, m.grouping, m.sort, m.cursor, m.stack.Depth(),
-		rowLabels(m), m.paused, m.showHelp, m.filter, cmd != nil)
+		rowLabels(m), m.paused, m.showHelp, m.filter, m.filtering, cmd != nil)
 }
 
 // rowLabels is the labels of the rows on screen, in order.
@@ -1252,5 +1255,385 @@ func TestGroupingToggleDoesNotWidenAPushedFrame(t *testing.T) {
 	m = pressAll(t, m, "esc", "esc")
 	if m.stack.Depth() != 0 || len(m.rows) != 1 || m.rows[0].Connections != 3 {
 		t.Errorf("after unwinding: depth %d, rows %v", m.stack.Depth(), rowLabels(m))
+	}
+}
+
+func TestHostnameColumnShowsTheAddressUntilItResolves(t *testing.T) {
+	// A model with no resolver behind it stands in for the state every
+	// destination is in on the first frame: the query has not answered, and
+	// the bare address is what there is to show.
+	m := newTestModel(destinationRows(), 120, 12)
+	m.stack.SetMode(ModeDestination)
+
+	got := m.View()
+	if !strings.Contains(got, "HOSTNAME") {
+		t.Fatalf("destination view has no hostname column:\n%s", got)
+	}
+
+	// The address appears twice on the row — once as the host, once standing
+	// in for its unresolved name — which is what tells the two columns apart
+	// from a single column that happens to be wide.
+	line := tableLine(t, got, "140.82.112.3")
+	if n := strings.Count(line, "140.82.112.3"); n != 2 {
+		t.Errorf("row shows the address %d times, want 2 (host and unresolved hostname):\n%s", n, line)
+	}
+}
+
+func TestHostnameColumnShowsResolvedNames(t *testing.T) {
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 120, 12)
+
+	got := m.View()
+	if !strings.Contains(got, "lb.github.com") {
+		t.Errorf("resolved name missing from the view:\n%s", got)
+	}
+
+	// The address it annotates stays on screen: the hostname is an extra
+	// column, not a substitution, so a row can still be read as the
+	// destination it is.
+	if !strings.Contains(got, "140.82.112.3:443") {
+		t.Errorf("the address was replaced rather than annotated:\n%s", got)
+	}
+
+	// The one that does not resolve is unaffected and still shows its address.
+	line := tableLine(t, got, "2606:4700:4700::1111")
+	if strings.Contains(line, "lb.github.com") {
+		t.Errorf("an unresolved row borrowed another row's name:\n%s", line)
+	}
+}
+
+func TestHostnamesAreNotShownInProcessMode(t *testing.T) {
+	// ByProcess rows carry no destination, so a hostname column there would be
+	// a column of nothing at all.
+	m := newTestModel(processRows(), 120, 12)
+
+	if got := m.View(); strings.Contains(got, "HOSTNAME") {
+		t.Errorf("process view has a hostname column:\n%s", got)
+	}
+}
+
+func TestFilterMatchesResolvedHostnames(t *testing.T) {
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 120, 12)
+	m.snap = testSnapshot()
+	m.rebuild()
+
+	m = pressAll(t, m, "/", "g", "i", "t", "h", "u", "b", "enter")
+
+	// Both of that host's ports match, and the host that does not resolve does
+	// not: the filter is reading a name that is nowhere in the row's label.
+	got := rowLabels(m)
+	if len(got) != 2 {
+		t.Fatalf("rows = %v, want both ports of the github destination", got)
+	}
+	for _, label := range got {
+		if !strings.HasPrefix(label, "140.82.112.3") {
+			t.Errorf("rows = %v, want only the github destination", got)
+		}
+	}
+}
+
+// tableLine returns the single rendered row containing want, so a test can
+// assert on one row rather than on the whole frame.
+func tableLine(t *testing.T, view, want string) string {
+	t.Helper()
+
+	var found []string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, want) && !strings.Contains(line, "HOSTNAME") {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d rows contain %q, want exactly 1:\n%s", len(found), want, view)
+	}
+	return found[0]
+}
+
+func TestFilterInputCapturesKeystrokes(t *testing.T) {
+	m := newLiveModel()
+
+	m, cmd := press(t, m, "/")
+	if !m.filtering {
+		t.Fatalf("/ did not open the filter input")
+	}
+	if cmd != nil {
+		t.Errorf("opening the filter input returned a command, want none")
+	}
+
+	// Every navigation binding is a bare letter, so the characters most likely
+	// to be typed into a filter are the ones that would otherwise quit the
+	// program or freeze the capture mid-word.
+	for _, k := range []string{"q", "p", "g", "s", "r", "j", "k", "G", "?"} {
+		var cmd tea.Cmd
+		m, cmd = press(t, m, k)
+
+		if cmd != nil {
+			t.Errorf("typing %q into the filter returned a command, want none", k)
+		}
+	}
+
+	if m.paused {
+		t.Errorf("typing \"p\" into the filter paused the capture")
+	}
+	if m.showHelp {
+		t.Errorf("typing \"?\" into the filter opened the help overlay")
+	}
+	if m.sort != SortRate {
+		t.Errorf("typing into the filter changed the sort to %s", m.sort)
+	}
+	if m.grouping != aggregate.GroupByIP {
+		t.Errorf("typing into the filter changed the grouping")
+	}
+	if got, want := m.filter, "qpgsrjkG?"; got != want {
+		t.Errorf("filter = %q, want every keystroke as text %q", got, want)
+	}
+}
+
+func TestFilterInputCtrlCStillQuits(t *testing.T) {
+	// The one key a text field must not swallow: it is the terminal's own
+	// interrupt rather than a letter anyone types, and a filter that ate it
+	// would leave no way out of the program at all.
+	m := pressAll(t, newLiveModel(), "/", "s")
+
+	_, cmd := press(t, m, "ctrl+c")
+	if cmd == nil {
+		t.Errorf("ctrl+c while filtering did not quit")
+	}
+}
+
+func TestFilterNarrowsTheTableAsItIsTyped(t *testing.T) {
+	m := newLiveModel()
+	if len(m.rows) != 3 {
+		t.Fatalf("setup has %d rows, want 3", len(m.rows))
+	}
+
+	m = pressAll(t, m, "/", "s", "s", "h")
+	if got := rowLabels(m); len(got) != 1 || got[0] != "sshd" {
+		t.Errorf("rows = %v, want just sshd while typing", got)
+	}
+}
+
+func TestFilterEnterCommits(t *testing.T) {
+	m := pressAll(t, newLiveModel(), "/", "s", "s", "h", "enter")
+
+	if m.filtering {
+		t.Errorf("enter did not close the filter input")
+	}
+	if m.filter != "ssh" {
+		t.Errorf("filter = %q, want %q", m.filter, "ssh")
+	}
+	if got := rowLabels(m); len(got) != 1 || got[0] != "sshd" {
+		t.Errorf("rows = %v, want just sshd", got)
+	}
+
+	// Enter is the drill key everywhere else; committing a filter must not
+	// also open the row under the cursor.
+	if d := m.stack.Depth(); d != 0 {
+		t.Errorf("committing the filter drilled in: depth = %d, want 0", d)
+	}
+}
+
+func TestFilterEscCancelsAndRestores(t *testing.T) {
+	m := pressAll(t, newLiveModel(), "/", "s", "s", "h", "enter")
+
+	m = pressAll(t, m, "/", "c", "h", "r", "o")
+	if got := rowLabels(m); len(got) != 1 || got[0] != "Google Chrome Helper" {
+		t.Errorf("rows = %v, want the new filter previewed", got)
+	}
+
+	m = pressAll(t, m, "esc")
+	if m.filtering {
+		t.Errorf("esc did not close the filter input")
+	}
+	if m.filter != "ssh" {
+		t.Errorf("filter = %q, want the previous filter %q back", m.filter, "ssh")
+	}
+	if got := rowLabels(m); len(got) != 1 || got[0] != "sshd" {
+		t.Errorf("rows = %v, want the previous filter's rows back", got)
+	}
+}
+
+func TestFilterEscDoesNotPopTheDrillStack(t *testing.T) {
+	// Esc is the way back out of a drill-down, and it is also the way out of
+	// the filter input. Cancelling an edit must cost the user only the edit:
+	// unwinding a level of navigation they did deliberately, on the same
+	// keypress, is exactly the conflict milestone 6 left esc free to avoid.
+	m := pressAll(t, newLiveModel(), "enter")
+	if m.stack.Depth() != 1 {
+		t.Fatalf("setup is at depth %d, want 1", m.stack.Depth())
+	}
+
+	m = pressAll(t, m, "/", "1", "esc")
+
+	if got := m.stack.Depth(); got != 1 {
+		t.Errorf("depth = %d after cancelling a filter, want 1", got)
+	}
+	if m.filtering {
+		t.Errorf("esc did not close the filter input")
+	}
+
+	// And with the input closed, esc means what it did before.
+	m = pressAll(t, m, "esc")
+	if got := m.stack.Depth(); got != 0 {
+		t.Errorf("depth = %d, want esc to pop the drill stack once the input is gone", got)
+	}
+}
+
+func TestFilterComposesWithDrillDown(t *testing.T) {
+	m := newLiveModel()
+	m.stack.SetMode(ModeDestination)
+	m.rebuild()
+
+	// Two of the three connections go to the same host, so drilling into it
+	// scopes the process view to exactly those two.
+	m = pressAll(t, m, "enter")
+	if got := rowLabels(m); len(got) != 2 {
+		t.Fatalf("drilled rows = %v, want the two processes talking to 140.82.112.3", got)
+	}
+
+	// The filter narrows what the drill-down already scoped rather than
+	// replacing it.
+	m = pressAll(t, m, "/", "c", "h", "r", "o", "m", "e", "enter")
+	if got := rowLabels(m); len(got) != 1 || got[0] != "Google Chrome Helper" {
+		t.Errorf("rows = %v, want the filter applied inside the drilled scope", got)
+	}
+	if got := m.stack.Depth(); got != 1 {
+		t.Errorf("depth = %d, want the drill-down still in force", got)
+	}
+
+	// And popping the drill-down leaves the filter behind: it is a property of
+	// the table rather than of one level of it, so the destination view it
+	// lands back on is narrowed by it too — to nothing, no destination being
+	// called "chrome".
+	m = pressAll(t, m, "esc")
+	if m.filter != "chrome" {
+		t.Errorf("filter = %q, want it to survive the pop", m.filter)
+	}
+	if got := rowLabels(m); len(got) != 0 {
+		t.Errorf("rows = %v, want the filter still narrowing the top-level view", got)
+	}
+
+	// Clearing it hands that view back.
+	m = pressAll(t, m, "/", "enter")
+	if got := rowLabels(m); len(got) != 2 {
+		t.Errorf("rows = %v, want the whole destination view back", got)
+	}
+}
+
+func TestFilterIsClearedByCommittingNothing(t *testing.T) {
+	m := pressAll(t, newLiveModel(), "/", "s", "s", "h", "enter")
+	if len(m.rows) != 1 {
+		t.Fatalf("setup has %d rows, want 1", len(m.rows))
+	}
+
+	// The input opens empty, so this is the whole gesture for taking a filter
+	// off again — and the footer says so while it is open.
+	m = pressAll(t, m, "/", "enter")
+
+	if m.filter != "" {
+		t.Errorf("filter = %q, want it cleared", m.filter)
+	}
+	if len(m.rows) != 3 {
+		t.Errorf("rows = %v, want the whole table back", rowLabels(m))
+	}
+}
+
+func TestFilterIsVisibleWhileItIsInForce(t *testing.T) {
+	m := pressAll(t, newLiveModel(), "/", "s", "s", "h")
+
+	// While typing, the footer is the input: the key hints it displaces are
+	// the ones that do nothing until the edit is over.
+	open := m.View()
+	if !strings.Contains(open, filterPrompt+"ssh") {
+		t.Errorf("the filter input is not on screen:\n%s", open)
+	}
+	if !strings.Contains(open, filterHint) {
+		t.Errorf("the filter input does not say how to close it:\n%s", open)
+	}
+	if strings.Contains(open, "cycle sort") {
+		t.Errorf("the key hints are still shown behind the filter input:\n%s", open)
+	}
+
+	// Once committed the input goes away, and the header carries the filter
+	// instead: rows silently missing from a table look exactly like traffic
+	// that stopped.
+	m = pressAll(t, m, "enter")
+	committed := m.View()
+	if !strings.Contains(committed, "filter: ssh") {
+		t.Errorf("the header does not name the filter in force:\n%s", committed)
+	}
+	if strings.Contains(committed, filterHint) {
+		t.Errorf("the filter input is still on screen after enter:\n%s", committed)
+	}
+
+	// And the footer offers the key that gets it back off again, which it does
+	// not do the rest of the time.
+	if !strings.Contains(committed, "/ filter") {
+		t.Errorf("the footer does not say how to change the filter:\n%s", committed)
+	}
+	if strings.Contains(newLiveModel().View(), "/ filter") {
+		t.Errorf("the footer offers the filter hint with no filter in force")
+	}
+}
+
+func TestFilterHeaderTruncatesALongFilter(t *testing.T) {
+	// The filter is the one part of the status bar the user types, so it is
+	// the one part that could otherwise shove everything else off the line.
+	m := newLiveModel()
+	m.filter = strings.Repeat("x", 200)
+
+	got := m.viewHeader()
+	if w := lipgloss.Width(got); w != 100 {
+		t.Errorf("header width = %d, want 100", w)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("a 200-character filter was not truncated:\n%s", got)
+	}
+}
+
+func TestEmptyTableSaysWhyItIsEmpty(t *testing.T) {
+	tests := []struct {
+		name  string
+		model func() Model
+		want  string
+	}{
+		{
+			name:  "nothing captured yet",
+			model: func() Model { return newLiveModel() },
+			want:  emptyMessage,
+		},
+		{
+			name: "a drilled-in scope that emptied",
+			model: func() Model {
+				m := pressAll(t, newLiveModel(), "enter")
+				m.snap = aggregate.Snapshot{At: testNow}
+				m.rebuild()
+				return m
+			},
+			want: emptyScopeMessage,
+		},
+		{
+			// The filter wins over both: it is the thing the user typed a
+			// moment ago, and the header is already naming it a line above.
+			name:  "a filter that matches nothing",
+			model: func() Model { return pressAll(t, newLiveModel(), "/", "z", "z", "z", "enter") },
+			want:  emptyFilterMessage,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := tc.model()
+			if tc.want == emptyMessage {
+				m.snap = aggregate.Snapshot{At: testNow}
+				m.rebuild()
+			}
+
+			if len(m.rows) != 0 {
+				t.Fatalf("setup has %d rows, want none", len(m.rows))
+			}
+			if got := m.View(); !strings.Contains(got, tc.want) {
+				t.Errorf("empty table does not say %q:\n%s", tc.want, got)
+			}
+		})
 	}
 }

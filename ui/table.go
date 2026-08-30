@@ -68,9 +68,17 @@ func sortRows(rows []aggregate.Row, k SortKey) {
 	})
 }
 
-// filterRows keeps only the rows whose label contains q, case-insensitively.
-// An empty query keeps everything.
-func filterRows(rows []aggregate.Row, q string) []aggregate.Row {
+// filterRows keeps only the rows matching q, case-insensitively. An empty
+// query keeps everything.
+//
+// A row matches on its label or on the hostname annotating it, so that a
+// destination can be found by the name the user knows it as — "github" finding
+// 140.82.112.3 — as well as by the address on screen. Both are matched because
+// only one of them is ever visible at a time on a narrow terminal, where the
+// hostname column is the first to be dropped: filtering on the label alone
+// would quietly stop finding hosts by name at exactly the width where the
+// names disappeared. hostname may be nil in views that have no destinations.
+func filterRows(rows []aggregate.Row, q string, hostname func(aggregate.Row) string) []aggregate.Row {
 	if q == "" {
 		return rows
 	}
@@ -79,6 +87,10 @@ func filterRows(rows []aggregate.Row, q string) []aggregate.Row {
 	out := rows[:0]
 	for _, r := range rows {
 		if strings.Contains(strings.ToLower(r.Label), q) {
+			out = append(out, r)
+			continue
+		}
+		if hostname != nil && strings.Contains(strings.ToLower(hostname(r)), q) {
 			out = append(out, r)
 		}
 	}
@@ -102,8 +114,13 @@ const (
 // rate/total columns are essential: the plan is explicit that live rate and
 // cumulative total are shown side by side at all times rather than toggled
 // between, so neither half may be traded away for width.
+//
+// The hostname goes first of all, because it is the only column that annotates
+// another one rather than carrying anything of its own: the address it names
+// is still on screen without it.
 const (
-	prioConnections = iota
+	prioHostname = iota
+	prioConnections
 	prioPID
 	prioEssential
 )
@@ -124,9 +141,9 @@ const (
 	// the minimum size.
 	defaultWidth = 100
 
-	// labelColumn is the index of the flexible label column. It is always
-	// first, and it is the only column whose width is computed rather than
-	// fixed.
+	// labelColumn is the index of the label column. It is always first, and it
+	// is always one of the flexible columns whose width is computed rather
+	// than fixed.
 	labelColumn = 0
 )
 
@@ -148,6 +165,12 @@ type column struct {
 	prio  int
 	cell  func(aggregate.Row) string
 
+	// flex marks a column whose width is not fixed but shared out from
+	// whatever the fixed-width columns leave over. The text in these columns —
+	// a process name, an address, a hostname — has no bound on its length, so
+	// there is no width that would be right at every terminal size.
+	flex bool
+
 	// sortable says whether sortKey below means anything, and sortKey is the
 	// sort key this column's numbers feed. Marking those columns in the header
 	// is what tells the user why the rows are in the order they are; the flag
@@ -164,17 +187,15 @@ type column struct {
 // tableColumns returns the column set for a view, in display order and before
 // any narrow-terminal trimming.
 //
-// TODO(milestone 7): the by-destination view gains a HOSTNAME column from the
-// async reverse resolver. It slots in immediately after the host column with a
-// priority below prioConnections — it is the first thing to go when space runs
-// short, because the IP it annotates is still on screen — and takes its width
-// from the label column's flexible share, which is why that share is computed
-// last rather than baked into a constant.
-func tableColumns(mode Mode, g aggregate.Grouping) []column {
+// hostname supplies the reverse-resolved name annotating a by-destination row;
+// it returns the bare address until one is known, and may be nil in a view
+// with no destinations to name.
+func tableColumns(mode Mode, g aggregate.Grouping, hostname func(aggregate.Row) string) []column {
 	cols := []column{{
 		title: "PROCESS",
 		align: alignLeft,
 		prio:  prioEssential,
+		flex:  true,
 		cell:  func(r aggregate.Row) string { return r.Label },
 	}}
 
@@ -193,6 +214,20 @@ func tableColumns(mode Mode, g aggregate.Grouping) []column {
 		cols[labelColumn].title = "HOST"
 		if g == aggregate.GroupByIPPort {
 			cols[labelColumn].title = "HOST:PORT"
+		}
+
+		// The hostname sits immediately beside the address it names, and
+		// shares the flexible width with it rather than taking a fixed slice:
+		// neither an address nor a fully qualified name has a length worth
+		// baking into a constant, and on a wide terminal both should grow.
+		if hostname != nil {
+			cols = append(cols, column{
+				title: "HOSTNAME",
+				align: alignLeft,
+				prio:  prioHostname,
+				flex:  true,
+				cell:  hostname,
+			})
 		}
 	}
 
@@ -245,15 +280,16 @@ func tableColumns(mode Mode, g aggregate.Grouping) []column {
 	)
 }
 
-// fitColumns trims cols to a terminal width and sizes the flexible label
-// column from what the fixed-width columns leave behind.
+// fitColumns trims cols to a terminal width and sizes the flexible columns
+// from what the fixed-width ones leave behind.
 //
-// The policy, in order: hand the label every spare cell; once that would push
-// it under minLabelWidth start dropping the lowest-priority column instead
-// (connection count first, then PID); and if even the essential columns do not
-// fit, stop dropping and render at the minimum width, letting the caller clip.
-// Shrinking the label is preferred over dropping a column because a truncated
-// process name is still recognisable, whereas a missing column is invisible.
+// The policy, in order: share every spare cell out between the flexible
+// columns; once that would push one of them under minLabelWidth start dropping
+// the lowest-priority column instead (hostname first, then connection count,
+// then PID); and if even the essential columns do not fit, stop dropping and
+// render at the minimum width, letting the caller clip. Shrinking the label is
+// preferred over dropping a column because a truncated process name is still
+// recognisable, whereas a missing column is invisible.
 func fitColumns(cols []column, width int) []column {
 	if width <= 0 {
 		width = defaultWidth
@@ -265,14 +301,43 @@ func fitColumns(cols []column, width int) []column {
 
 	for {
 		fixed := (len(cols) - 1) * colGap
+		flex := 0
 		for _, c := range cols {
 			fixed += c.width
+			if c.flex {
+				flex++
+			}
 		}
 
 		spare := width - fixed
-		if spare >= minLabelWidth || !dropLowest(&cols) {
-			cols[labelColumn].width = max(spare, minLabelWidth)
+		if spare >= minLabelWidth*flex || !dropLowest(&cols) {
+			shareFlex(cols, spare, flex)
 			return cols
+		}
+	}
+}
+
+// shareFlex divides spare evenly between the flexible columns, never taking
+// any of them below minLabelWidth.
+//
+// The odd cells go to the leftmost, which is the label: it carries the
+// identity of the row, so if one of the two has to be a cell narrower it
+// should not be that one.
+func shareFlex(cols []column, spare, flex int) {
+	if flex <= 0 {
+		return
+	}
+
+	each := max(spare/flex, minLabelWidth)
+	extra := spare - each*flex
+	for i := range cols {
+		if !cols[i].flex {
+			continue
+		}
+		cols[i].width = each
+		if extra > 0 {
+			cols[i].width += extra
+			extra = 0
 		}
 	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/boyvinall/mac-nethogs/aggregate"
 	"github.com/boyvinall/mac-nethogs/capture"
+	"github.com/boyvinall/mac-nethogs/dns"
 	"github.com/boyvinall/mac-nethogs/procinfo"
 	"github.com/boyvinall/mac-nethogs/ui"
 )
@@ -83,6 +84,10 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	poller := procinfo.NewPoller()
 	agg := aggregate.New(capturer, poller)
 
+	// The resolver needs no goroutine of its own: it starts one per lookup,
+	// from the render loop, and bounds them itself.
+	resolver := dns.NewResolver()
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -91,7 +96,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	g.Go(func() error { return poller.Run(ctx) })
 	g.Go(func() error {
 		defer stop()
-		p := tea.NewProgram(ui.NewModel(agg, iface), tea.WithAltScreen(), tea.WithContext(ctx))
+		p := tea.NewProgram(ui.NewModel(ctx, agg, resolver, iface), tea.WithAltScreen(), tea.WithContext(ctx))
 		_, err := p.Run()
 		return err
 	})

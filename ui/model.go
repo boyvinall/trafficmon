@@ -2,15 +2,19 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/boyvinall/mac-nethogs/aggregate"
+	"github.com/boyvinall/mac-nethogs/dns"
 )
 
 // TickInterval is the render cadence. It is deliberately independent of both
@@ -39,6 +43,13 @@ const emptyMessage = "  (no traffic yet)"
 // only thing left to do here.
 const emptyScopeMessage = "  (nothing left in this view — esc to go back)"
 
+// emptyFilterMessage stands in for the table body of a view whose filter
+// matches nothing. It takes precedence over the other two: a filter is
+// something the user typed a moment ago and can undo, so it is far and away
+// the likeliest explanation for an empty table, and "no traffic yet" would be
+// a flat contradiction of the header bar naming the filter that emptied it.
+const emptyFilterMessage = "  (nothing matches the filter — / to change it)"
+
 // minBreadcrumbWidth is the narrowest breadcrumb worth rendering. Below it a
 // drill path says nothing at all, so the header spends the cells on the status
 // instead.
@@ -47,11 +58,35 @@ const minBreadcrumbWidth = 12
 // breadcrumbPrefix separates the drill path from the mode label it hangs off.
 const breadcrumbPrefix = "› "
 
+// filterPrompt marks the filter input, echoing the key that opened it the way
+// less and vim do, so the line reads as the thing `/` just started.
+const filterPrompt = "/"
+
+// filterHint spells out the two keys that close the input, and the one thing
+// about it that is not guessable: that committing nothing is how a filter is
+// taken off again.
+const filterHint = "enter apply · empty clears · esc cancel"
+
+// maxFilterLabel bounds the filter shown in the header bar. The filter is the
+// one piece of the status the user types, so it is the one piece that could
+// otherwise be long enough to shove everything else off the line.
+const maxFilterLabel = 16
+
 type tickMsg time.Time
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	agg    *aggregate.Aggregator
+	agg *aggregate.Aggregator
+	// resolver turns remote addresses into hostnames. It answers from cache
+	// and never blocks, so View may call it freely; see dns.Resolver.
+	resolver *dns.Resolver
+	// ctx is the program's lifetime, held so that the background lookups the
+	// render loop starts are wound up with it. Bubble Tea hands Update and
+	// View no context of their own, and the alternative — resolving against
+	// context.Background — would leave Lookup's cancellation permanently
+	// theoretical.
+	ctx context.Context
+
 	iface  string
 	keys   KeyMap
 	styles Styles
@@ -79,21 +114,65 @@ type Model struct {
 	now      time.Time
 	paused   bool
 	showHelp bool
-	filter   string
+
+	// filter is the substring the table is narrowed to, and input is the line
+	// editor `/` opens to change it. The two are kept apart because the filter
+	// outlives the input: it goes on narrowing the table long after the input
+	// has been dismissed, and it is what the header reports.
+	filter string
+	input  textinput.Model
+	// filtering says the input has the keyboard, which is what stops the
+	// single-letter navigation bindings from firing on every character typed.
+	filtering bool
+	// filterBefore is the filter the input was opened over, so esc can put it
+	// back. The table filters as the user types, so without it a cancelled
+	// edit would leave the previous filter as thoroughly gone as a committed
+	// one.
+	filterBefore string
 
 	width, height int
 }
 
-// NewModel builds the root model.
-func NewModel(agg *aggregate.Aggregator, iface string) Model {
+// NewModel builds the root model. ctx bounds the reverse-DNS lookups the view
+// starts; res may be nil, in which case destinations are never named.
+func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, iface string) Model {
+	input := textinput.New()
+	input.Prompt = filterPrompt
+
+	// A static cursor rather than a blinking one: blinking is driven by a
+	// command per blink, which would have to be threaded back through Update
+	// on every frame to keep going, and it would redraw the screen on its own
+	// schedule alongside the tick. The filter is on screen for a few seconds
+	// at a time and the prompt already says where the keyboard is pointing.
+	input.Cursor.SetMode(cursor.CursorStatic)
+
 	return Model{
-		agg:    agg,
-		iface:  iface,
-		keys:   DefaultKeyMap(),
-		styles: DefaultStyles(),
-		help:   help.New(),
-		stack:  NewStack(ModeProcess),
+		agg:      agg,
+		resolver: res,
+		ctx:      ctx,
+		iface:    iface,
+		keys:     DefaultKeyMap(),
+		styles:   DefaultStyles(),
+		help:     help.New(),
+		stack:    NewStack(ModeProcess),
+		input:    input,
 	}
+}
+
+// hostname is the reverse-resolved name for a row's destination, falling back
+// to the bare address until — or unless — one is known.
+//
+// It is safe to call from the render loop: dns.Resolver answers from its cache
+// and starts anything it is missing in the background, so a frame is never
+// held up by a query. A newly resolved name therefore appears on the next tick
+// rather than the moment it lands, which is the whole point: the table redraws
+// every second anyway, so there is nothing for a notification to make happen
+// sooner than the frame that was coming regardless.
+func (m Model) hostname(r aggregate.Row) string {
+	if r.RemoteAddr == "" || m.resolver == nil {
+		return r.RemoteAddr
+	}
+	return m.resolver.Lookup(m.ctx, r.RemoteAddr)
 }
 
 // Init starts the render ticker.
@@ -106,8 +185,6 @@ func tick() tea.Cmd {
 }
 
 // Update handles input and tick messages.
-//
-// TODO(milestone 7): make `/` open a text input rather than only clearing.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -135,6 +212,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // bindings that act — rebinding a key in one place cannot leave the other
 // describing the old one.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While the filter input has the keyboard, a keypress is text and nothing
+	// else. Nearly every binding below is a bare letter, so honouring them
+	// during an edit would have "q" quit and "p" pause in the middle of a
+	// word; the input is claimed first rather than fallen through to.
+	if m.filtering {
+		return m.handleFilterKey(msg)
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -171,8 +256,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setSort(m.sort.toggleRate())
 
 	case key.Matches(msg, m.keys.Filter):
-		m.filter = ""
-		m.rebuild()
+		m.openFilter()
 
 	case key.Matches(msg, m.keys.Pause):
 		m.paused = !m.paused
@@ -180,6 +264,80 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = !m.showHelp
 	}
 	return m, nil
+}
+
+// handleFilterKey applies one keypress while the filter input is open.
+//
+// The three keys it intercepts are matched on the key type rather than through
+// the KeyMap, because in this context they do not mean what the KeyMap says
+// they do. Enter is the drill key and esc pops the drill stack, yet here they
+// have to commit and cancel the edit — milestone 6 left esc unclaimed at depth
+// 0 for exactly this — and esc's other key, backspace, must stay a text edit
+// rather than becoming a second way out. Reusing the bindings would therefore
+// mean either drilling on commit or deleting a character on cancel.
+//
+// Ctrl-C is the exception that proves it: it is the terminal's own interrupt
+// rather than a letter anyone types into a filter, and a text field that
+// swallowed it would leave the user with no way out of the program at all.
+func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.cancelFilter()
+		return m, nil
+	case tea.KeyEnter:
+		m.commitFilter()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+
+	// The table narrows as the user types rather than on commit: an
+	// incremental filter is how the user finds out whether what they have
+	// typed so far picks out the row they are after, and it is what gives esc
+	// something to undo.
+	m.filter = m.input.Value()
+	m.rebuild()
+	return m, cmd
+}
+
+// openFilter hands the keyboard to the filter input.
+//
+// It starts empty rather than pre-filled with the filter in force, so that the
+// commonest thing to do next — type a new filter — needs no clearing first,
+// and so that committing an empty input is a plain, discoverable way to take a
+// filter off again.
+func (m *Model) openFilter() {
+	m.filterBefore = m.filter
+	m.filtering = true
+
+	m.input.SetValue("")
+
+	// Focus hands back a command to start the cursor blinking, which the
+	// static cursor NewModel configures never needs; it is nil here.
+	m.input.Focus()
+
+	m.filter = ""
+	m.rebuild()
+}
+
+// commitFilter accepts what was typed and returns the keyboard to the table.
+// The filter itself is already in force, having been applied keystroke by
+// keystroke.
+func (m *Model) commitFilter() {
+	m.filtering = false
+	m.input.Blur()
+}
+
+// cancelFilter abandons the edit and puts back the filter it was opened over.
+func (m *Model) cancelFilter() {
+	m.filtering = false
+	m.input.Blur()
+
+	m.filter = m.filterBefore
+	m.rebuild()
 }
 
 // moveCursor moves the selection by delta rows, clamping at both ends.
@@ -333,7 +491,7 @@ func (m *Model) rebuild() {
 		rows = aggregate.ByDestination(snap, m.grouping)
 	}
 
-	rows = filterRows(rows, m.filter)
+	rows = filterRows(rows, m.filter, m.hostname)
 	sortRows(rows, m.sort)
 	m.setRows(rows)
 }
@@ -437,7 +595,16 @@ func (m Model) viewHeader() string {
 	// The sort key is named here as well as marked on the column it reads,
 	// because that column is one of the first to be dropped on a narrow
 	// terminal and the row order would otherwise have no explanation at all.
-	status := m.styles.Breadcrumb.Render("sort: " + m.sort.String() + " · " + m.iface + " ·")
+	//
+	// A filter in force is named alongside it for the same kind of reason,
+	// and a stronger one: rows silently absent from the table look exactly
+	// like traffic that stopped, and unlike the sort there is no mark
+	// anywhere else on the screen to give it away.
+	label := "sort: " + m.sort.String() + " · " + m.iface + " ·"
+	if m.filter != "" {
+		label = "filter: " + truncate(m.filter, maxFilterLabel) + " · " + label
+	}
+	status := m.styles.Breadcrumb.Render(label)
 
 	// The capture flag is the other half of the right-hand end, and the two
 	// are kept apart because they are not equally expendable: the sort and
@@ -512,7 +679,7 @@ func breadcrumbSegment(path string, mode Mode, w int) string {
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
-	cols := fitColumns(tableColumns(m.stack.Top().Mode, m.grouping), m.viewWidth())
+	cols := fitColumns(tableColumns(m.stack.Top().Mode, m.grouping, m.hostname), m.viewWidth())
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {
@@ -537,10 +704,14 @@ func (m Model) viewTable() []string {
 	return m.fit(lines)
 }
 
-// emptyBody explains a table with no rows in it. Inside a drill-down the scope
-// is the likely reason there is nothing to show, so the two cases are worded
-// separately rather than a filtered view claiming the capture has seen nothing.
+// emptyBody explains a table with no rows in it. A filter and a drill-down
+// scope are each a likelier reason for one than an idle capture, and each has
+// its own way out, so all three are worded separately rather than any of them
+// claiming the capture has seen nothing.
 func (m Model) emptyBody() string {
+	if m.filter != "" {
+		return emptyFilterMessage
+	}
 	if m.stack.Depth() > 0 {
 		return emptyScopeMessage
 	}
@@ -558,8 +729,13 @@ func (m Model) viewHelp() []string {
 	return m.fit(lines)
 }
 
-// viewFooter renders the context-sensitive key hints.
+// viewFooter renders the context-sensitive key hints, or the filter input in
+// their place while one is being typed.
 func (m Model) viewFooter() string {
+	if m.filtering {
+		return m.viewFilterInput()
+	}
+
 	h := m.help
 	h.ShowAll = false
 
@@ -570,20 +746,45 @@ func (m Model) viewFooter() string {
 	return m.styles.Footer.Render(h.ShortHelpView(m.footerKeys()))
 }
 
+// viewFilterInput renders the filter line the `/` key opens.
+//
+// It takes the footer's line rather than a line of its own: the footer is
+// where the eye already goes to find out what can be pressed, the hints it
+// displaces are precisely the ones that do not apply while the keyboard
+// belongs to the input, and borrowing a line the frame already has costs the
+// table no rows. When the typed filter grows long enough to reach the hint,
+// joinEnds drops the hint rather than wrapping — by then it has been read.
+func (m Model) viewFilterInput() string {
+	// The footer style pads a cell either side, which is width the line
+	// itself cannot use.
+	w := max(m.viewWidth()-2, 1)
+	return m.styles.Footer.Render(joinEnds(m.input.View(), filterHint, w))
+}
+
 // footerKeys picks the hints for the current context: the standard set at the
 // top level, and once the user has drilled in, the way back out in place of
 // the top-level mode toggle. Esc does nothing at depth 0 and tab does nothing
 // below it, so advertising either where it has no effect would be a lie.
+//
+// A filter in force adds `/` to the list. It is the one state the user can put
+// the table into that hides rows, so it is the one they may need to undo
+// without having been told how; the rest of the time the footer is better
+// spent on the keys that do something to what is on screen.
 func (m Model) footerKeys() []key.Binding {
 	keys := m.keys.ShortHelp()
-	if m.stack.Depth() == 0 {
+	if m.stack.Depth() == 0 && m.filter == "" {
 		return keys
 	}
 
-	out := make([]key.Binding, 0, len(keys))
+	out := make([]key.Binding, 0, len(keys)+1)
 	for _, k := range keys {
-		if k.Help() == m.keys.Mode.Help() {
+		if m.stack.Depth() > 0 && k.Help() == m.keys.Mode.Help() {
 			k = m.keys.Back
+		}
+		// Ahead of the help key, so the hints that change the table stay
+		// together and the two that are about the session stay last.
+		if m.filter != "" && k.Help() == m.keys.Help.Help() {
+			out = append(out, m.keys.Filter)
 		}
 		out = append(out, k)
 	}

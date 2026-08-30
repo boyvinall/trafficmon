@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+	"errors"
 	"os"
 	"reflect"
 	"regexp"
@@ -14,6 +16,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/boyvinall/mac-nethogs/aggregate"
+	"github.com/boyvinall/mac-nethogs/dns"
 )
 
 // TestMain pins the colour profile so the rendered strings the tests assert on
@@ -115,14 +118,68 @@ func destinationRows() []aggregate.Row {
 	}
 }
 
+// stubHostname is a hostname source for the layout tests, which care that the
+// column is there and how wide it is rather than what is in it.
+func stubHostname(r aggregate.Row) string { return r.RemoteAddr }
+
 // newTestModel builds a model with a fixed viewport and pre-loaded rows,
-// bypassing the aggregator so the view can be exercised without a capture.
+// bypassing the aggregator so the view can be exercised without a capture. Its
+// resolver never resolves anything, which is the state every destination
+// starts in: the bare address, shown until a name arrives.
 func newTestModel(rows []aggregate.Row, width, height int) Model {
-	m := NewModel(nil, "en0")
+	m := NewModel(context.Background(), nil, nil, "en0")
 	m.rows = rows
 	m.now = testNow
 	m.width, m.height = width, height
 	return m
+}
+
+// newResolvedModel builds a destination-mode model over destinationRows whose
+// resolver has already answered for every address in names, so the view can be
+// asserted on with hostnames actually on screen.
+//
+// The lookups are asynchronous by design, so the helper drives them the way the
+// render loop does — by asking repeatedly — rather than reaching into the
+// resolver. Nothing here touches the network: the resolver is built over a
+// function that answers from names alone.
+func newResolvedModel(t *testing.T, names map[string]string, width, height int) Model {
+	t.Helper()
+
+	m := newTestModel(destinationRows(), width, height)
+	m.stack.SetMode(ModeDestination)
+	m.grouping = aggregate.GroupByIPPort
+	m.resolver = dns.NewResolverWith(func(_ context.Context, addr string) ([]string, error) {
+		if name, ok := names[addr]; ok {
+			return []string{name + "."}, nil
+		}
+		return nil, errors.New("no such host")
+	})
+
+	waitFor(t, "every destination to resolve", func() bool {
+		for _, r := range m.rows {
+			if want, ok := names[r.RemoteAddr]; ok && m.hostname(r) != want {
+				return false
+			}
+		}
+		return true
+	})
+	return m
+}
+
+// waitFor polls cond until it holds, failing the test if it never does. It is
+// how the tests over background work stay deterministic without a fixed sleep:
+// the poll ends the moment the work lands, and the deadline is long enough
+// that only a genuine failure reaches it.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // testSnapshot is the aggregator output the interaction tests drive the model

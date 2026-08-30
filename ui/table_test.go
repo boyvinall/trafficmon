@@ -19,7 +19,7 @@ func columnTitles(cols []column) []string {
 }
 
 func TestRenderRowsAlign(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 100)
+	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
 	want := tableWidth(cols)
 
 	// The header is checked under every sort key, because the marker the
@@ -40,7 +40,7 @@ func TestRenderRowsAlign(t *testing.T) {
 }
 
 func TestRenderRowsColumnOffsetsAreStable(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 100)
+	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
 	lines := renderRows(processRows(), cols)
 
 	// The right-hand edge of each column is a fixed offset. Checking that the
@@ -64,7 +64,7 @@ func TestRenderRowsColumnOffsetsAreStable(t *testing.T) {
 }
 
 func TestRenderRowShowsRateAndTotalTogether(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 100)
+	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
 	line := renderRow(processRows()[0], cols)
 
 	// The plan is explicit that rate and cumulative total are not a toggle, so
@@ -89,17 +89,17 @@ func TestTableColumnsByMode(t *testing.T) {
 		},
 		{
 			name: "destination by ip", mode: ModeDestination, grouping: aggregate.GroupByIP,
-			want: []string{"HOST", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			want: []string{"HOST", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
 		},
 		{
 			name: "destination by ip:port", mode: ModeDestination, grouping: aggregate.GroupByIPPort,
-			want: []string{"HOST:PORT", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			want: []string{"HOST:PORT", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := columnTitles(tableColumns(tc.mode, tc.grouping))
+			got := columnTitles(tableColumns(tc.mode, tc.grouping, stubHostname))
 			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)
 			}
@@ -151,7 +151,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), tc.width)
+			cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), tc.width)
 
 			if got := columnTitles(cols); strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)
@@ -170,7 +170,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 }
 
 func TestFitColumnsDoesNotMutateInput(t *testing.T) {
-	cols := tableColumns(ModeProcess, aggregate.GroupByIP)
+	cols := tableColumns(ModeProcess, aggregate.GroupByIP, nil)
 	before := len(cols)
 
 	fitColumns(cols, 40)
@@ -181,7 +181,7 @@ func TestFitColumnsDoesNotMutateInput(t *testing.T) {
 }
 
 func TestLabelTruncatesAtNarrowWidth(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 60)
+	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 60)
 	line := renderRow(processRows()[0], cols)
 
 	label := string([]rune(line)[:cols[labelColumn].width])
@@ -362,7 +362,7 @@ func TestTableHeaderMarksTheSortedColumns(t *testing.T) {
 		{name: "connections", k: SortConnections, marked: []string{"CONN"}},
 	}
 
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 100)
+	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -454,6 +454,101 @@ func TestSortRowsByKey(t *testing.T) {
 			}
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("sorted by %s = %v, want %v", tc.k, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFitColumnsDropsTheHostnameFirst(t *testing.T) {
+	tests := []struct {
+		name       string
+		width      int
+		want       []string
+		labelWidth int
+	}{
+		{
+			// The two flexible columns split what the fixed ones leave, so a
+			// wide terminal spends its extra cells on both.
+			name: "roomy", width: 120,
+			want:       []string{"HOST", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			labelWidth: 32,
+		},
+		{
+			name: "typical", width: 100,
+			want:       []string{"HOST", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			labelWidth: 22,
+		},
+		{
+			// The hostname goes before the connection count, which outranks
+			// it: the address the hostname annotates is still on screen
+			// without it, whereas nothing else says how many connections a
+			// row stands for.
+			name: "hostname dropped first", width: 76,
+			want:       []string{"HOST", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			labelWidth: 21,
+		},
+		{
+			name: "connections dropped second", width: 64,
+			want:       []string{"HOST", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 16,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cols := fitColumns(tableColumns(ModeDestination, aggregate.GroupByIP, stubHostname), tc.width)
+
+			if got := columnTitles(cols); strings.Join(got, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("columns = %v, want %v", got, tc.want)
+			}
+			if got := cols[labelColumn].width; got != tc.labelWidth {
+				t.Errorf("label width = %d, want %d", got, tc.labelWidth)
+			}
+			if w := tableWidth(cols); w != tc.width {
+				t.Errorf("table width = %d, want %d", w, tc.width)
+			}
+		})
+	}
+}
+
+func TestFilterRowsMatchesLabelsAndHostnames(t *testing.T) {
+	rows := []aggregate.Row{
+		{Key: "140.82.112.3", Label: "140.82.112.3", RemoteAddr: "140.82.112.3"},
+		{Key: "10.0.0.5", Label: "10.0.0.5", RemoteAddr: "10.0.0.5"},
+	}
+	hostname := func(r aggregate.Row) string {
+		if r.RemoteAddr == "140.82.112.3" {
+			return "lb.github.com"
+		}
+		return r.RemoteAddr
+	}
+
+	tests := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{name: "empty keeps everything", query: "", want: []string{"140.82.112.3", "10.0.0.5"}},
+		{name: "matches the label", query: "10.0.0", want: []string{"10.0.0.5"}},
+		{
+			// The name is what the user knows the host as, and on a narrow
+			// terminal it is not even on screen to be read off and typed.
+			name: "matches the hostname", query: "github", want: []string{"140.82.112.3"},
+		},
+		{name: "case insensitive", query: "GITHUB", want: []string{"140.82.112.3"}},
+		{name: "matches neither", query: "nothing", want: nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterRows(append([]aggregate.Row(nil), rows...), tc.query, hostname)
+
+			labels := make([]string, len(got))
+			for i, r := range got {
+				labels[i] = r.Label
+			}
+			if strings.Join(labels, "|") != strings.Join(tc.want, "|") {
+				t.Errorf("filterRows(%q) = %v, want %v", tc.query, labels, tc.want)
 			}
 		})
 	}
