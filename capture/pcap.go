@@ -165,6 +165,31 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) {
 	ctr.Add(ts, n, inbound)
 }
 
+// Evict drops every flow last seen before the cutoff and reports how many it
+// removed.
+//
+// Nothing else ever removes a flow, so without this the table grows by one
+// counter per connection the host has ever made and never shrinks — a leak
+// that only shows up on a long run. The aggregator calls it with the grace
+// period's cutoff, once a flow is too stale to appear in the UI at all: a
+// packet arriving on an evicted flow afterwards simply starts a fresh counter,
+// which is the same thing the UI would show for a brand new connection.
+func (c *Capturer) Evict(before time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := 0
+	for k, ctr := range c.flows {
+		// LastSeen takes the counter's own lock, in the same map-then-counter
+		// order Snapshot uses, so the two cannot deadlock against each other.
+		if ctr.LastSeen().Before(before) {
+			delete(c.flows, k)
+			n++
+		}
+	}
+	return n
+}
+
 // Snapshot returns a point-in-time copy of every flow's counters, for the
 // aggregator to join against the process map.
 func (c *Capturer) Snapshot(now time.Time) map[FlowKey]FlowStats {

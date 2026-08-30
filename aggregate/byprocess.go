@@ -1,11 +1,21 @@
 package aggregate
 
+import "strconv"
+
 // ByProcess rolls connection records up by owning PID.
 //
-// TODO(milestone 3): sum counters per PID and count connections.
+// The PID is the row key rather than the process name: two processes can share
+// a name, and a name can change under a PID, whereas the PID is what the
+// drill-down filters on.
 func ByProcess(snap Snapshot) []Row {
-	_ = snap
-	return nil
+	return rollup(snap.Connections, func(c ConnectionRecord) (string, Row) {
+		key := strconv.Itoa(int(c.PID))
+		return key, Row{
+			Key:   key,
+			Label: c.ProcessName,
+			PID:   c.PID,
+		}
+	})
 }
 
 // FilterByDestination narrows a snapshot to the connections talking to one

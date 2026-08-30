@@ -1,5 +1,10 @@
 package aggregate
 
+import (
+	"net"
+	"strconv"
+)
+
 // Grouping controls how finely the by-destination view buckets remote hosts.
 type Grouping uint8
 
@@ -14,11 +19,22 @@ const (
 // ByDestination rolls connection records up by remote host, at the requested
 // granularity.
 //
-// TODO(milestone 3): sum counters per destination key and count connections.
+// The row key doubles as the label because the address is what identifies the
+// destination; net.JoinHostPort is used for the IP:port form so that an IPv6
+// address comes out bracketed and stays parseable.
 func ByDestination(snap Snapshot, g Grouping) []Row {
-	_ = snap
-	_ = g
-	return nil
+	return rollup(snap.Connections, func(c ConnectionRecord) (string, Row) {
+		row := Row{
+			Label:      c.RemoteAddr,
+			RemoteAddr: c.RemoteAddr,
+		}
+		if g == GroupByIPPort {
+			row.RemotePort = c.RemotePort
+			row.Label = net.JoinHostPort(c.RemoteAddr, strconv.Itoa(int(c.RemotePort)))
+		}
+		row.Key = row.Label
+		return row.Key, row
+	})
 }
 
 // FilterByProcess narrows a snapshot to one process's connections, for the

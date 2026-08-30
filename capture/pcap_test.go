@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -113,4 +114,56 @@ func TestCapturerRunStopsOnContextCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run() did not return within 5s of cancellation")
 	}
+}
+
+func TestCapturerEvictDropsStaleFlows(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	fresh := FlowKey{LocalAddr: mustAddr(t, "10.0.0.1"), LocalPort: 1, Proto: ProtoTCP}
+	stale := FlowKey{LocalAddr: mustAddr(t, "10.0.0.1"), LocalPort: 2, Proto: ProtoTCP}
+
+	c.record(fresh, now, 100, true)
+	c.record(stale, now.Add(-time.Minute), 100, true)
+
+	if n := c.Evict(now.Add(-30 * time.Second)); n != 1 {
+		t.Fatalf("Evict() removed %d flows, want 1", n)
+	}
+	if _, ok := c.flows[stale]; ok {
+		t.Error("stale flow survived Evict()")
+	}
+	if _, ok := c.flows[fresh]; !ok {
+		t.Error("Evict() removed a flow that was still active")
+	}
+
+	// A second pass with the same cutoff has nothing left to do.
+	if n := c.Evict(now.Add(-30 * time.Second)); n != 0 {
+		t.Errorf("second Evict() removed %d flows, want 0", n)
+	}
+}
+
+func TestCapturerEvictConcurrentWithRecord(t *testing.T) {
+	// Evict walks the map while holding the write lock and calls into each
+	// counter's own lock; recording concurrently must not deadlock or race.
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			key := FlowKey{LocalAddr: mustAddr(t, "10.0.0.1"), LocalPort: uint16(i % 16), Proto: ProtoUDP}
+			c.record(key, now, 1, true)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			c.Evict(now.Add(time.Second))
+		}
+	}()
+
+	wg.Wait()
 }
