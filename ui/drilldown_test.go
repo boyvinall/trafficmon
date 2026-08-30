@@ -1,6 +1,10 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/boyvinall/mac-nethogs/aggregate"
+)
 
 func TestStackBreadcrumb(t *testing.T) {
 	tests := []struct {
@@ -76,5 +80,114 @@ func TestStackBreadcrumbAfterPop(t *testing.T) {
 	s.Pop()
 	if got := s.Breadcrumb(); got != "" {
 		t.Errorf("Breadcrumb() = %q, want empty", got)
+	}
+}
+
+func TestStackHasScope(t *testing.T) {
+	s := NewStack(ModeProcess)
+
+	// The bottom frame filters nothing, so its empty scope must not match the
+	// empty scope of a frame that was pushed without one.
+	if s.HasScope("") || s.HasScope("pid:980") {
+		t.Fatalf("a fresh stack carries no scope")
+	}
+
+	s.Push(Frame{Scope: "pid:980"})
+	s.Push(Frame{Scope: "dst:140.82.112.3"})
+
+	for _, scope := range []string{"pid:980", "dst:140.82.112.3"} {
+		if !s.HasScope(scope) {
+			t.Errorf("HasScope(%q) = false, want true", scope)
+		}
+	}
+	if s.HasScope("pid:22") {
+		t.Errorf("HasScope reports a scope that was never pushed")
+	}
+
+	s.Pop()
+	if s.HasScope("dst:140.82.112.3") {
+		t.Errorf("a popped frame still holds its scope")
+	}
+	if !s.HasScope("pid:980") {
+		t.Errorf("popping dropped more than the top frame")
+	}
+}
+
+func TestProcessFrame(t *testing.T) {
+	f := processFrame(aggregate.Row{Key: "980", Label: "Google Chrome Helper", PID: 980})
+
+	if f.Mode != ModeDestination {
+		t.Errorf("a process drills into the destination view, got mode %d", f.Mode)
+	}
+	if want := "Process: Google Chrome Helper (pid 980)"; f.Label != want {
+		t.Errorf("Label = %q, want %q", f.Label, want)
+	}
+	if want := "pid:980"; f.Scope != want {
+		t.Errorf("Scope = %q, want %q", f.Scope, want)
+	}
+
+	got := f.Filter(testSnapshot())
+	if len(got.Connections) != 1 || got.Connections[0].PID != 980 {
+		t.Errorf("filter kept %d connections, want only pid 980's", len(got.Connections))
+	}
+}
+
+func TestDestinationFrame(t *testing.T) {
+	tests := []struct {
+		name      string
+		row       aggregate.Row
+		grouping  aggregate.Grouping
+		wantLabel string
+		wantScope string
+		wantConns int
+	}{
+		{
+			// Grouped by IP the port is not part of what the user selected, so
+			// every port of the host stays in scope.
+			name:      "by ip",
+			row:       aggregate.Row{Label: "140.82.112.3", RemoteAddr: "140.82.112.3"},
+			grouping:  aggregate.GroupByIP,
+			wantLabel: "Destination: 140.82.112.3",
+			wantScope: "dst:140.82.112.3",
+			wantConns: 2,
+		},
+		{
+			name:      "by ip:port",
+			row:       aggregate.Row{Label: "140.82.112.3:443", RemoteAddr: "140.82.112.3", RemotePort: 443},
+			grouping:  aggregate.GroupByIPPort,
+			wantLabel: "Destination: 140.82.112.3:443",
+			wantScope: "dst:140.82.112.3:443",
+			wantConns: 1,
+		},
+		{
+			// An IPv6 destination is bracketed in the breadcrumb exactly as it
+			// is in the table, rather than ending in an ambiguous run of
+			// colons.
+			name:      "ipv6 by ip:port",
+			row:       aggregate.Row{Label: "[2606:4700:4700::1111]:53", RemoteAddr: "2606:4700:4700::1111", RemotePort: 53},
+			grouping:  aggregate.GroupByIPPort,
+			wantLabel: "Destination: [2606:4700:4700::1111]:53",
+			wantScope: "dst:[2606:4700:4700::1111]:53",
+			wantConns: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := destinationFrame(tc.row, tc.grouping)
+
+			if f.Mode != ModeProcess {
+				t.Errorf("a destination drills into the process view, got mode %d", f.Mode)
+			}
+			if f.Label != tc.wantLabel {
+				t.Errorf("Label = %q, want %q", f.Label, tc.wantLabel)
+			}
+			if f.Scope != tc.wantScope {
+				t.Errorf("Scope = %q, want %q", f.Scope, tc.wantScope)
+			}
+			if got := f.Filter(testSnapshot()); len(got.Connections) != tc.wantConns {
+				t.Errorf("filter kept %d connections, want %d", len(got.Connections), tc.wantConns)
+			}
+		})
 	}
 }

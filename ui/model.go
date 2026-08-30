@@ -32,6 +32,21 @@ const defaultPageSize = 10
 // so a working but idle capture does not look like a broken one.
 const emptyMessage = "  (no traffic yet)"
 
+// emptyScopeMessage stands in for the table body of a drilled-in view with
+// nothing left in it — the process exited, or the host went quiet. It is
+// worded differently from emptyMessage because "no traffic yet" would be
+// plainly wrong with a busy table one esc away, and because the way out is the
+// only thing left to do here.
+const emptyScopeMessage = "  (nothing left in this view — esc to go back)"
+
+// minBreadcrumbWidth is the narrowest breadcrumb worth rendering. Below it a
+// drill path says nothing at all, so the header spends the cells on the status
+// instead.
+const minBreadcrumbWidth = 12
+
+// breadcrumbPrefix separates the drill path from the mode label it hangs off.
+const breadcrumbPrefix = "› "
+
 type tickMsg time.Time
 
 // Model is the root Bubble Tea model.
@@ -92,7 +107,6 @@ func tick() tea.Cmd {
 
 // Update handles input and tick messages.
 //
-// TODO(milestone 6): wire Enter/Esc onto the drill-down stack.
 // TODO(milestone 7): make `/` open a text input rather than only clearing.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -142,6 +156,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleMode()
 	case key.Matches(msg, m.keys.Grouping):
 		m.toggleGrouping()
+
+	case key.Matches(msg, m.keys.Enter):
+		m.drillIn()
+	case key.Matches(msg, m.keys.Back):
+		m.drillOut()
 
 	// `s` walks the whole cycle and `r` jumps straight between the two
 	// bandwidth sorts the plan singles out; both land on the same SortKey, so
@@ -222,6 +241,57 @@ func (m *Model) toggleGrouping() {
 	} else {
 		m.grouping = aggregate.GroupByIP
 	}
+	m.resetRows()
+	m.rebuild()
+}
+
+// drillIn opens the selected row in the opposite view, scoped to it: a process
+// row leads to that process's destinations, a destination row to the processes
+// talking to it. It is the enter half of the drill-down stack.
+//
+// The cursor is reset rather than carried over, because the rows either side
+// of the drill are not the same kind of thing — the row the user was pointing
+// at does not exist in the view they land in — so there is no selection to
+// preserve and holding the index would land them somewhere arbitrary.
+func (m *Model) drillIn() {
+	// An empty table has nothing to drill into, and the cursor is allowed to
+	// sit outside the rows — no selection at all is a state the view renders
+	// quite happily — so neither can be assumed away here.
+	if m.cursor < 0 || m.cursor >= len(m.rows) {
+		return
+	}
+
+	var f Frame
+	switch m.stack.Top().Mode {
+	case ModeProcess:
+		f = processFrame(m.rows[m.cursor])
+	case ModeDestination:
+		f = destinationFrame(m.rows[m.cursor], m.grouping)
+	}
+
+	// Drilling into a scope the stack already carries would add a level
+	// showing the rows underneath it unchanged. See Stack.HasScope.
+	if m.stack.HasScope(f.Scope) {
+		return
+	}
+
+	m.stack.Push(f)
+	m.resetRows()
+	m.rebuild()
+}
+
+// drillOut pops back to the view the user drilled down from.
+//
+// At the top level there is nothing to pop and it does nothing at all: the
+// footer does not offer esc there, and leaving the key unclaimed at depth 0 is
+// what lets milestone 7 give it the "cancel the filter input" meaning without
+// having to take it off the drill-down stack first.
+func (m *Model) drillOut() {
+	if m.stack.Depth() == 0 {
+		return
+	}
+
+	m.stack.Pop()
 	m.resetRows()
 	m.rebuild()
 }
@@ -363,21 +433,80 @@ func (m Model) viewHeader() string {
 	// The header style already pads a cell either side, so the segments hung
 	// off it must not add a leading space of their own.
 	left := m.styles.Header.Render(appName + " · " + modeLabel(m.stack.Top().Mode, m.grouping))
-	if bc := m.stack.Breadcrumb(); bc != "" {
-		left += m.styles.Breadcrumb.Render("› " + bc)
-	}
 
 	// The sort key is named here as well as marked on the column it reads,
 	// because that column is one of the first to be dropped on a narrow
 	// terminal and the row order would otherwise have no explanation at all.
-	status := "sort: " + m.sort.String() + " · " + m.iface
+	status := m.styles.Breadcrumb.Render("sort: " + m.sort.String() + " · " + m.iface + " ·")
 
-	right := m.styles.Breadcrumb.Render(status + " · live")
+	// The capture flag is the other half of the right-hand end, and the two
+	// are kept apart because they are not equally expendable: the sort and
+	// interface are said elsewhere on the screen, whereas a frozen table looks
+	// exactly like a live one that has gone quiet and only this says which.
+	flag := m.styles.Breadcrumb.Render(" live")
 	if m.paused {
-		right = m.styles.Breadcrumb.Render(status+" ·") + m.styles.Paused.Render(" PAUSED ")
+		flag = m.styles.Paused.Render(" PAUSED ")
+	}
+	right := status + flag
+
+	if path := m.stack.Breadcrumb(); path != "" {
+		// The breadcrumb is the one segment of the bar with no bound on its
+		// length — it grows a step with every level drilled — so it is given
+		// what the other segments leave rather than allowed to shove them off
+		// the end. Where that is not enough to say anything, the status half
+		// hands its cells over: which scope is on screen is the more useful of
+		// the two, and it only does so if that actually buys a breadcrumb.
+		//
+		// " live" goes with it, being the absence of news; " PAUSED " never
+		// does.
+		spare := ""
+		if m.paused {
+			spare = flag
+		}
+
+		room := m.viewWidth() - lipgloss.Width(left) - lipgloss.Width(right) - 1
+		bare := m.viewWidth() - lipgloss.Width(left) - lipgloss.Width(spare) - 1
+		if room < minBreadcrumbWidth && bare >= minBreadcrumbWidth {
+			right, room = spare, bare
+		}
+
+		if seg := breadcrumbSegment(path, m.stack.Top().Mode, room); seg != "" {
+			left += m.styles.Breadcrumb.Render(seg)
+		}
 	}
 
 	return joinEnds(left, right, m.viewWidth())
+}
+
+// breadcrumbSegment renders the drill path into at most w cells of the header
+// bar.
+//
+// With room it reads as the plan writes it — "› Process: Chrome (pid 4821) →
+// Destinations" — the trailing noun naming what the view the user landed in is
+// a list of. That noun is the first thing given up when the path outgrows the
+// bar, because the mode label at the other end of the same bar already says
+// it; only then is the path itself cut, and from the left, so that the
+// innermost scope — the one the rows on screen are actually filtered by —
+// survives.
+func breadcrumbSegment(path string, mode Mode, w int) string {
+	// Too narrow to read: the cells are better spent on the status, and a
+	// breadcrumb clipped to a couple of characters is worse than none.
+	if w < minBreadcrumbWidth {
+		return ""
+	}
+
+	noun := "Processes"
+	if mode == ModeDestination {
+		noun = "Destinations"
+	}
+
+	if full := breadcrumbPrefix + path + " → " + noun; lipgloss.Width(full) <= w {
+		return full
+	}
+	if short := breadcrumbPrefix + path; lipgloss.Width(short) <= w {
+		return short
+	}
+	return breadcrumbPrefix + truncateLeft(path, w-lipgloss.Width(breadcrumbPrefix))
 }
 
 // viewTable renders the column titles and as many rows as fit, keeping the
@@ -387,7 +516,7 @@ func (m Model) viewTable() []string {
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {
-		lines = append(lines, m.styles.Breadcrumb.Render(emptyMessage))
+		lines = append(lines, m.styles.Breadcrumb.Render(m.emptyBody()))
 		return m.fit(lines)
 	}
 
@@ -406,6 +535,16 @@ func (m Model) viewTable() []string {
 		lines = append(lines, line)
 	}
 	return m.fit(lines)
+}
+
+// emptyBody explains a table with no rows in it. Inside a drill-down the scope
+// is the likely reason there is nothing to show, so the two cases are worded
+// separately rather than a filtered view claiming the capture has seen nothing.
+func (m Model) emptyBody() string {
+	if m.stack.Depth() > 0 {
+		return emptyScopeMessage
+	}
+	return emptyMessage
 }
 
 // viewHelp renders the full key reference in place of the table.

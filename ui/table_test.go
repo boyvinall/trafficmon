@@ -228,6 +228,38 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
+func TestTruncateLeft(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		w    int
+		want string
+	}{
+		{name: "fits exactly", s: "sshd", w: 4, want: "sshd"},
+		{name: "shorter than cell", s: "sshd", w: 8, want: "sshd"},
+		// The end of the string is the part worth keeping: it is the innermost
+		// scope of a drill path, and the levels above it are one esc away.
+		{name: "one over", s: "sshd", w: 3, want: "…hd"},
+		{name: "single cell", s: "sshd", w: 1, want: "…"},
+		{name: "no room", s: "sshd", w: 0, want: ""},
+		{name: "negative", s: "sshd", w: -3, want: ""},
+		{name: "empty", s: "", w: 5, want: ""},
+		{name: "wide runes", s: "日本語です", w: 5, want: "…です"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateLeft(tc.s, tc.w)
+			if got != tc.want {
+				t.Errorf("truncateLeft(%q, %d) = %q, want %q", tc.s, tc.w, got, tc.want)
+			}
+			if tc.w > 0 && lipgloss.Width(got) > tc.w {
+				t.Errorf("truncateLeft(%q, %d) = %q, %d cells wide", tc.s, tc.w, got, lipgloss.Width(got))
+			}
+		})
+	}
+}
+
 func TestPad(t *testing.T) {
 	tests := []struct {
 		name  string

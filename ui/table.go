@@ -395,6 +395,37 @@ func truncate(s string, w int) string {
 	return b.String() + "…"
 }
 
+// truncateLeft shortens s to at most w display cells by dropping runes from
+// the front rather than the back, marking the cut with a leading ellipsis.
+//
+// It exists for the breadcrumb, where the end of the string is the part worth
+// keeping: the innermost scope is the one the rows on screen are actually
+// filtered by, and the levels above it are context the user can recover by
+// pressing esc.
+func truncateLeft(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+
+	runes := []rune(s)
+	used, i := 0, len(runes)
+	for i > 0 {
+		rw := lipgloss.Width(string(runes[i-1]))
+		if used+rw > w-1 {
+			break
+		}
+		used += rw
+		i--
+	}
+	return "…" + string(runes[i:])
+}
+
 // humanBytes formats a byte count for display, e.g. "128 MB".
 func humanBytes(n uint64) string {
 	const unit = 1024
