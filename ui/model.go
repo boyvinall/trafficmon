@@ -24,6 +24,10 @@ const appName = "mac-nethogs"
 // header bar, the column titles and the footer.
 const chromeLines = 3
 
+// defaultPageSize is how far PgUp/PgDn move the cursor before the terminal
+// height is known and a real screenful can be measured.
+const defaultPageSize = 10
+
 // emptyMessage stands in for the table body before any traffic has been seen,
 // so a working but idle capture does not look like a broken one.
 const emptyMessage = "  (no traffic yet)"
@@ -43,6 +47,13 @@ type Model struct {
 	stack    *Stack
 	grouping aggregate.Grouping
 	sort     SortKey
+
+	// snap is the most recent aggregator snapshot, kept so that a change of
+	// mode, grouping, sort or filter can rebuild the table from it on the very
+	// next frame. Waiting for the next tick would leave the header describing
+	// one view while the table still showed another, and while paused it would
+	// never take effect at all.
+	snap aggregate.Snapshot
 
 	rows   []aggregate.Row
 	cursor int
@@ -81,7 +92,6 @@ func tick() tea.Cmd {
 
 // Update handles input and tick messages.
 //
-// TODO(milestone 5): wire navigation and the mode/grouping toggles.
 // TODO(milestone 6): wire Enter/Esc onto the drill-down stack.
 // TODO(milestone 7): make `/` open a text input rather than only clearing.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -90,46 +100,225 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 
 	case tickMsg:
+		// A paused model freezes its clock along with its rows: `now` is what
+		// decides which rows render as closed, so letting it run on would have
+		// a frozen table quietly grey itself out.
 		if !m.paused {
 			m.refresh(time.Time(msg))
 		}
 		return m, tick()
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "p":
-			m.paused = !m.paused
-		case "?":
-			m.showHelp = !m.showHelp
-		case "s":
-			m.sort = (m.sort + 1) % 3
-		case "/":
-			m.filter = ""
-		}
+		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
-// refresh recomputes the visible rows from a fresh aggregator snapshot.
-func (m *Model) refresh(now time.Time) {
-	snap := m.stack.Apply(m.agg.Refresh(now))
+// handleKey applies one keypress.
+//
+// Keys are matched against the KeyMap rather than compared as strings, so the
+// bindings the footer and the help overlay advertise are by construction the
+// bindings that act — rebinding a key in one place cannot leave the other
+// describing the old one.
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
 
+	case key.Matches(msg, m.keys.Up):
+		m.moveCursor(-1)
+	case key.Matches(msg, m.keys.Down):
+		m.moveCursor(1)
+	case key.Matches(msg, m.keys.PageUp):
+		m.moveCursor(-m.pageSize())
+	case key.Matches(msg, m.keys.PageDown):
+		m.moveCursor(m.pageSize())
+	case key.Matches(msg, m.keys.Home):
+		m.moveCursor(-len(m.rows))
+	case key.Matches(msg, m.keys.End):
+		m.moveCursor(len(m.rows))
+
+	case key.Matches(msg, m.keys.Mode):
+		m.toggleMode()
+	case key.Matches(msg, m.keys.Grouping):
+		m.toggleGrouping()
+
+	// `s` walks the whole cycle and `r` jumps straight between the two
+	// bandwidth sorts the plan singles out; both land on the same SortKey, so
+	// whichever the user reaches for, the other stays consistent with it.
+	case key.Matches(msg, m.keys.Sort):
+		m.setSort(m.sort.next())
+	case key.Matches(msg, m.keys.RateSort):
+		m.setSort(m.sort.toggleRate())
+
+	case key.Matches(msg, m.keys.Filter):
+		m.filter = ""
+		m.rebuild()
+
+	case key.Matches(msg, m.keys.Pause):
+		m.paused = !m.paused
+	case key.Matches(msg, m.keys.Help):
+		m.showHelp = !m.showHelp
+	}
+	return m, nil
+}
+
+// moveCursor moves the selection by delta rows, clamping at both ends.
+//
+// It deliberately does not wrap: rows reorder under the cursor as traffic
+// moves, so wrapping would fling the user to the far end of a table that may
+// have just changed shape — and nethogs does not wrap either.
+func (m *Model) moveCursor(delta int) {
+	if len(m.rows) == 0 {
+		m.cursor = 0
+		return
+	}
+	m.cursor = clamp(m.cursor+delta, 0, len(m.rows)-1)
+}
+
+// pageSize is how far PgUp/PgDn move the cursor: one screenful, so that paging
+// lines up with what the user can actually see. Until the first
+// tea.WindowSizeMsg arrives there is no screenful to measure, so it falls back
+// to a fixed jump.
+func (m Model) pageSize() int {
+	if n := m.rowLines(); n > 0 {
+		return n
+	}
+	return defaultPageSize
+}
+
+// toggleMode swaps the top-level view between processes and destinations.
+//
+// It does nothing once the user has drilled in. Tab means "show me the other
+// top-level view", and inside a drill-down the other view of the same scope is
+// exactly what Enter already offers; silently unwinding the drill path on a
+// key that normally does something small would throw away navigation the user
+// did deliberately. Esc is the way back out, and footerKeys stops offering tab
+// at depth so the key is not advertised where it has no effect.
+func (m *Model) toggleMode() {
+	if m.stack.Depth() > 0 {
+		return
+	}
+
+	if m.stack.Top().Mode == ModeProcess {
+		m.stack.SetMode(ModeDestination)
+	} else {
+		m.stack.SetMode(ModeProcess)
+	}
+	m.resetRows()
+	m.rebuild()
+}
+
+// toggleGrouping switches the by-destination view between one row per remote
+// IP and one per remote IP:port. The by-process view has no destinations to
+// group, so there it is a no-op rather than a change that only shows up later.
+func (m *Model) toggleGrouping() {
+	if m.stack.Top().Mode != ModeDestination {
+		return
+	}
+
+	if m.grouping == aggregate.GroupByIP {
+		m.grouping = aggregate.GroupByIPPort
+	} else {
+		m.grouping = aggregate.GroupByIP
+	}
+	m.resetRows()
+	m.rebuild()
+}
+
+// setSort changes the sort key and reorders what is already on screen, so the
+// new order is visible on the next frame rather than at the next tick.
+func (m *Model) setSort(k SortKey) {
+	m.sort = k
+	m.rebuild()
+}
+
+// refresh pulls a fresh snapshot from the aggregator and rebuilds the table
+// from it.
+func (m *Model) refresh(now time.Time) {
+	m.snap = m.agg.Refresh(now)
+	m.now = now
+	m.rebuild()
+}
+
+// rebuild recomputes the visible rows from the snapshot the model already
+// holds.
+//
+// It never asks the aggregator for fresh data: Refresh recomputes rates
+// against a newer clock and ages rows out, which is precisely what pause
+// exists to prevent, so a mode or sort change made while paused must be able
+// to redraw the frozen data rather than thaw it.
+//
+// Taking the rows apart from where they came from is also what lets the parts
+// with all the subtlety in them — the filter, the sort and the cursor — be
+// exercised with hand-built inputs, no live capture and no root.
+func (m *Model) rebuild() {
+	snap := m.stack.Apply(m.snap)
+
+	var rows []aggregate.Row
 	switch m.stack.Top().Mode {
 	case ModeProcess:
-		m.rows = aggregate.ByProcess(snap)
+		rows = aggregate.ByProcess(snap)
 	case ModeDestination:
-		m.rows = aggregate.ByDestination(snap, m.grouping)
+		rows = aggregate.ByDestination(snap, m.grouping)
 	}
 
-	m.rows = filterRows(m.rows, m.filter)
-	sortRows(m.rows, m.sort)
-	m.now = now
+	rows = filterRows(rows, m.filter)
+	sortRows(rows, m.sort)
+	m.setRows(rows)
+}
 
-	if m.cursor >= len(m.rows) {
-		m.cursor = max(0, len(m.rows)-1)
+// setRows installs a freshly computed row set, keeping the cursor on the row
+// it was already on.
+func (m *Model) setRows(rows []aggregate.Row) {
+	key := m.selectedKey()
+	m.rows = rows
+	m.cursor = cursorFor(rows, key, m.cursor)
+}
+
+// resetRows drops the rows on screen so that the next rebuild starts from the
+// top. Changing mode or grouping changes what a row *is*, so there is no row
+// left for the cursor to hold onto and keeping its index would land it
+// somewhere arbitrary.
+func (m *Model) resetRows() {
+	m.rows, m.cursor = nil, 0
+}
+
+// selectedKey is the Key of the row under the cursor, or "" when there is no
+// selection to preserve.
+func (m Model) selectedKey() string {
+	if m.cursor < 0 || m.cursor >= len(m.rows) {
+		return ""
 	}
+	return m.rows[m.cursor].Key
+}
+
+// cursorFor finds where the row identified by key ended up in a freshly built
+// row set.
+//
+// Rows reorder on nearly every refresh, so the cursor has to track the row the
+// user selected rather than the position it happened to be in — otherwise the
+// selection slides onto whatever row overtook it, and pressing enter opens
+// something the user was not pointing at. A row that has aged out entirely has
+// no new index to find, so the old position is the next best thing: the
+// neighbours of a vanished row are what the user was looking at.
+func cursorFor(rows []aggregate.Row, key string, fallback int) int {
+	if len(rows) == 0 {
+		return 0
+	}
+	if key != "" {
+		for i, r := range rows {
+			if r.Key == key {
+				return i
+			}
+		}
+	}
+	return clamp(fallback, 0, len(rows)-1)
+}
+
+// clamp confines v to [lo, hi].
+func clamp(v, lo, hi int) int {
+	return min(max(v, lo), hi)
 }
 
 // View renders the header bar, the table (or the help overlay in its place)
@@ -142,6 +331,23 @@ func (m Model) View() string {
 		lines = append(lines, m.viewTable()...)
 	}
 	lines = append(lines, m.viewFooter())
+
+	// Nothing may be wider than the terminal, and the pieces cannot all
+	// guarantee that themselves: the column layout has a floor it refuses to
+	// shrink past, and the help bubble stops dropping columns while it is
+	// still overflowing. Clipping here catches all of them in one place, and
+	// it has to be done: an over-wide line wraps, and every wrapped line
+	// pushes the footer further off the bottom of the screen.
+	//
+	// Only the lines that actually overflow are put through it: clipping
+	// rewrites a line's styling cell by cell, which is a lot of escape
+	// sequences to send every second for lines that already fit.
+	clip := lipgloss.NewStyle().MaxWidth(m.viewWidth())
+	for i, l := range lines {
+		if lipgloss.Width(l) > m.viewWidth() {
+			lines[i] = clip.Render(l)
+		}
+	}
 
 	// A frame taller than the terminal would scroll the header off the top, so
 	// clip rather than let that happen on a very short window.
@@ -161,9 +367,14 @@ func (m Model) viewHeader() string {
 		left += m.styles.Breadcrumb.Render("› " + bc)
 	}
 
-	right := m.styles.Breadcrumb.Render(m.iface + " · live")
+	// The sort key is named here as well as marked on the column it reads,
+	// because that column is one of the first to be dropped on a narrow
+	// terminal and the row order would otherwise have no explanation at all.
+	status := "sort: " + m.sort.String() + " · " + m.iface
+
+	right := m.styles.Breadcrumb.Render(status + " · live")
 	if m.paused {
-		right = m.styles.Breadcrumb.Render(m.iface+" ·") + m.styles.Paused.Render(" PAUSED ")
+		right = m.styles.Breadcrumb.Render(status+" ·") + m.styles.Paused.Render(" PAUSED ")
 	}
 
 	return joinEnds(left, right, m.viewWidth())
@@ -173,7 +384,7 @@ func (m Model) viewHeader() string {
 // cursor on screen.
 func (m Model) viewTable() []string {
 	cols := fitColumns(tableColumns(m.stack.Top().Mode, m.grouping), m.viewWidth())
-	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols))}
+	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {
 		lines = append(lines, m.styles.Breadcrumb.Render(emptyMessage))
@@ -221,14 +432,23 @@ func (m Model) viewFooter() string {
 }
 
 // footerKeys picks the hints for the current context: the standard set at the
-// top level, plus the way back out once the user has drilled in. Esc does
-// nothing at depth 0, so advertising it there would be a lie.
+// top level, and once the user has drilled in, the way back out in place of
+// the top-level mode toggle. Esc does nothing at depth 0 and tab does nothing
+// below it, so advertising either where it has no effect would be a lie.
 func (m Model) footerKeys() []key.Binding {
 	keys := m.keys.ShortHelp()
-	if m.stack.Depth() > 0 {
-		keys = append(keys, m.keys.Back)
+	if m.stack.Depth() == 0 {
+		return keys
 	}
-	return keys
+
+	out := make([]key.Binding, 0, len(keys))
+	for _, k := range keys {
+		if k.Help() == m.keys.Mode.Help() {
+			k = m.keys.Back
+		}
+		out = append(out, k)
+	}
+	return out
 }
 
 // fit pads or trims the body to exactly the number of lines the frame has room

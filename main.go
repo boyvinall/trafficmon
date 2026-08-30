@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -101,8 +102,23 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	return nil
 }
 
-// isShutdown reports whether err is just the result of the context being
-// cancelled during an orderly quit.
+// isShutdown reports whether err is just the result of the program being wound
+// up in an orderly way, rather than something the user needs to be told about.
+//
+// The comparisons have to be errors.Is rather than ==: bubbletea reports a
+// cancelled external context as ErrProgramKilled wrapped around the context's
+// own error, so an equality test would let the most ordinary termination there
+// is — the user pressing q, which cancels the context capture and polling run
+// under — through as a failure and print it on the way out.
+//
+// A panic is deliberately not on the list even though bubbletea wraps that in
+// ErrProgramKilled as well: a render loop that crashed is exactly the kind of
+// thing that must not be filtered away as routine.
 func isShutdown(err error) bool {
-	return err == context.Canceled || err == tea.ErrProgramKilled
+	if errors.Is(err, tea.ErrProgramPanic) {
+		return false
+	}
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, tea.ErrProgramKilled) ||
+		errors.Is(err, tea.ErrInterrupted)
 }

@@ -2,11 +2,14 @@ package ui
 
 import (
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
@@ -120,4 +123,125 @@ func newTestModel(rows []aggregate.Row, width, height int) Model {
 	m.now = testNow
 	m.width, m.height = width, height
 	return m
+}
+
+// testSnapshot is the aggregator output the interaction tests drive the model
+// from. Two of its three processes talk to the same host on different ports,
+// so that by-process, by-destination-by-ip and by-destination-by-ip:port each
+// roll the same data up into a different number of rows.
+func testSnapshot() aggregate.Snapshot {
+	return aggregate.Snapshot{
+		At: testNow,
+		Connections: []aggregate.ConnectionRecord{
+			{
+				PID: 412, ProcessName: "com.apple.WebKit.Networking",
+				LocalPort: 51000, RemoteAddr: "140.82.112.3", RemotePort: 443, Proto: "tcp",
+				BytesInTotal: 134217728, BytesOutTotal: 12582912,
+				RateInBps: 2202009, RateOutBps: 184320, LastSeen: testNow,
+			},
+			{
+				PID: 980, ProcessName: "Google Chrome Helper",
+				LocalPort: 51001, RemoteAddr: "140.82.112.3", RemotePort: 80, Proto: "tcp",
+				BytesInTotal: 4194304, BytesOutTotal: 786432,
+				RateInBps: 51200, RateOutBps: 8192, LastSeen: testNow,
+			},
+			{
+				PID: 22, ProcessName: "sshd",
+				LocalPort: 22, RemoteAddr: "10.0.0.5", RemotePort: 51234, Proto: "tcp",
+				BytesInTotal: 1048576, BytesOutTotal: 2097152,
+				RateInBps: 1024, RateOutBps: 1536, LastSeen: testNow,
+			},
+		},
+	}
+}
+
+// newLiveModel builds a model holding testSnapshot with its rows already
+// derived from it: the state the model sits in between ticks, which is what
+// every keypress acts on.
+func newLiveModel() Model {
+	m := newTestModel(nil, 100, 12)
+	m.snap = testSnapshot()
+	m.rebuild()
+	return m
+}
+
+// keyRows builds a row set carrying nothing but identity, for the tests about
+// where the cursor lands rather than what a row says.
+func keyRows(keys ...string) []aggregate.Row {
+	rows := make([]aggregate.Row, len(keys))
+	for i, k := range keys {
+		rows[i] = aggregate.Row{Key: k, Label: k}
+	}
+	return rows
+}
+
+// specialKeys maps the names the bindings are declared with to the key types
+// bubbletea reports them as, so a test can drive Update with the same strings
+// keys.go spells out.
+var specialKeys = map[string]tea.KeyType{
+	"up":        tea.KeyUp,
+	"down":      tea.KeyDown,
+	"pgup":      tea.KeyPgUp,
+	"pgdown":    tea.KeyPgDown,
+	"home":      tea.KeyHome,
+	"end":       tea.KeyEnd,
+	"tab":       tea.KeyTab,
+	"enter":     tea.KeyEnter,
+	"esc":       tea.KeyEsc,
+	"backspace": tea.KeyBackspace,
+	"ctrl+c":    tea.KeyCtrlC,
+	"ctrl+b":    tea.KeyCtrlB,
+	"ctrl+f":    tea.KeyCtrlF,
+}
+
+// keyMsg builds the message bubbletea would deliver for a named key. Anything
+// not in specialKeys is a literal rune, which is how every printable binding
+// arrives.
+func keyMsg(name string) tea.KeyMsg {
+	if t, ok := specialKeys[name]; ok {
+		return tea.KeyMsg(tea.Key{Type: t})
+	}
+	return tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune(name)})
+}
+
+// press drives one keypress through Update, which is all a test needs to
+// exercise the input path: no terminal, no program loop.
+func press(t *testing.T, m Model, name string) (Model, tea.Cmd) {
+	t.Helper()
+
+	// A helper that built the wrong message would silently test nothing, so
+	// check it round-trips to the name the binding is declared with.
+	if got := keyMsg(name).String(); got != name {
+		t.Fatalf("keyMsg(%q) is delivered as %q", name, got)
+	}
+
+	next, cmd := m.Update(keyMsg(name))
+	return next.(Model), cmd
+}
+
+// pressAll drives a sequence of keypresses through Update.
+func pressAll(t *testing.T, m Model, names ...string) Model {
+	t.Helper()
+	for _, name := range names {
+		m, _ = press(t, m, name)
+	}
+	return m
+}
+
+// allBindings returns every binding declared on a KeyMap. Walking the struct
+// rather than a hand-written list is what makes the tests over it notice a
+// binding that was added but never documented or wired up.
+func allBindings(t *testing.T, k KeyMap) []key.Binding {
+	t.Helper()
+
+	v := reflect.ValueOf(k)
+	out := make([]key.Binding, 0, v.NumField())
+	for i := range v.NumField() {
+		b, ok := v.Field(i).Interface().(key.Binding)
+		if !ok {
+			t.Fatalf("KeyMap field %s is not a key.Binding", v.Type().Field(i).Name)
+		}
+		out = append(out, b)
+	}
+	return out
 }

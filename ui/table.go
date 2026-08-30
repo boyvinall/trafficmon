@@ -19,7 +19,39 @@ const (
 	SortRate SortKey = iota
 	SortTotal
 	SortConnections
+
+	// numSortKeys bounds the `s` cycle, so a new key only has to be added
+	// above. It must stay last.
+	numSortKeys
 )
+
+// next returns the key `s` cycles to, wrapping back round to the rate sort.
+func (k SortKey) next() SortKey { return (k + 1) % numSortKeys }
+
+// toggleRate returns the key `r` jumps to.
+//
+// The plan gives `r` the narrower job of choosing which of the two bandwidth
+// numbers drives the order, so it flips between rate and total and treats the
+// connection-count sort — which is neither — as "not one of mine", landing on
+// rate. `s` remains the way to reach every key in turn.
+func (k SortKey) toggleRate() SortKey {
+	if k == SortRate {
+		return SortTotal
+	}
+	return SortRate
+}
+
+// String names the sort key for the header bar.
+func (k SortKey) String() string {
+	switch k {
+	case SortTotal:
+		return "total"
+	case SortConnections:
+		return "connections"
+	default:
+		return "rate"
+	}
+}
 
 // sortRows orders rows by the active sort key, descending.
 func sortRows(rows []aggregate.Row, k SortKey) {
@@ -98,6 +130,11 @@ const (
 	labelColumn = 0
 )
 
+// sortMarker flags the column titles the active sort key reads. Rows are
+// always ordered largest first, so a downward-pointing mark doubles as the
+// direction indicator.
+const sortMarker = "▾"
+
 // column describes one table column: its title, how wide it is, and how to
 // pull its value out of a row.
 //
@@ -110,6 +147,18 @@ type column struct {
 	align alignment
 	prio  int
 	cell  func(aggregate.Row) string
+
+	// sortable says whether sortKey below means anything, and sortKey is the
+	// sort key this column's numbers feed. Marking those columns in the header
+	// is what tells the user why the rows are in the order they are; the flag
+	// is needed because the zero SortKey is a real key, so a column that
+	// drives no ordering cannot say so by omission.
+	//
+	// A sort key can be spread over more than one column — the rate sort adds
+	// both directions together — in which case every column it reads is
+	// marked.
+	sortable bool
+	sortKey  SortKey
 }
 
 // tableColumns returns the column set for a view, in display order and before
@@ -149,39 +198,49 @@ func tableColumns(mode Mode, g aggregate.Grouping) []column {
 
 	return append(cols,
 		column{
-			title: "↓ RATE",
-			width: rateWidth,
-			align: alignRight,
-			prio:  prioEssential,
-			cell:  func(r aggregate.Row) string { return humanRate(r.RateInBps) },
+			title:    "↓ RATE",
+			width:    rateWidth,
+			align:    alignRight,
+			prio:     prioEssential,
+			cell:     func(r aggregate.Row) string { return humanRate(r.RateInBps) },
+			sortable: true,
+			sortKey:  SortRate,
 		},
 		column{
-			title: "↑ RATE",
-			width: rateWidth,
-			align: alignRight,
-			prio:  prioEssential,
-			cell:  func(r aggregate.Row) string { return humanRate(r.RateOutBps) },
+			title:    "↑ RATE",
+			width:    rateWidth,
+			align:    alignRight,
+			prio:     prioEssential,
+			cell:     func(r aggregate.Row) string { return humanRate(r.RateOutBps) },
+			sortable: true,
+			sortKey:  SortRate,
 		},
 		column{
-			title: "↓ TOTAL",
-			width: totalWidth,
-			align: alignRight,
-			prio:  prioEssential,
-			cell:  func(r aggregate.Row) string { return humanBytes(r.BytesInTotal) },
+			title:    "↓ TOTAL",
+			width:    totalWidth,
+			align:    alignRight,
+			prio:     prioEssential,
+			cell:     func(r aggregate.Row) string { return humanBytes(r.BytesInTotal) },
+			sortable: true,
+			sortKey:  SortTotal,
 		},
 		column{
-			title: "↑ TOTAL",
-			width: totalWidth,
-			align: alignRight,
-			prio:  prioEssential,
-			cell:  func(r aggregate.Row) string { return humanBytes(r.BytesOutTotal) },
+			title:    "↑ TOTAL",
+			width:    totalWidth,
+			align:    alignRight,
+			prio:     prioEssential,
+			cell:     func(r aggregate.Row) string { return humanBytes(r.BytesOutTotal) },
+			sortable: true,
+			sortKey:  SortTotal,
 		},
 		column{
-			title: "CONN",
-			width: connWidth,
-			align: alignRight,
-			prio:  prioConnections,
-			cell:  func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
+			title:    "CONN",
+			width:    connWidth,
+			align:    alignRight,
+			prio:     prioConnections,
+			cell:     func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
+			sortable: true,
+			sortKey:  SortConnections,
 		},
 	)
 }
@@ -247,11 +306,21 @@ func tableWidth(cols []column) int {
 	return w
 }
 
-// tableHeader renders the column title row.
-func tableHeader(cols []column) string {
+// tableHeader renders the column title row, marking the columns the active
+// sort key reads.
+//
+// The marker is prefixed rather than appended, and carries no separating
+// space, because the numeric columns are sized to the widest value they can
+// hold: anything wider than one cell would push a title out of its column and
+// have it truncated.
+func tableHeader(cols []column, k SortKey) string {
 	cells := make([]string, len(cols))
 	for i, c := range cols {
-		cells[i] = pad(c.title, c.width, c.align)
+		title := c.title
+		if c.sortable && c.sortKey == k {
+			title = sortMarker + title
+		}
+		cells[i] = pad(title, c.width, c.align)
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }

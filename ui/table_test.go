@@ -22,8 +22,12 @@ func TestRenderRowsAlign(t *testing.T) {
 	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 100)
 	want := tableWidth(cols)
 
-	if got := lipgloss.Width(tableHeader(cols)); got != want {
-		t.Errorf("header width = %d, want %d", got, want)
+	// The header is checked under every sort key, because the marker the
+	// active one adds to a title has to fit inside the column it marks.
+	for k := SortKey(0); k < numSortKeys; k++ {
+		if got := lipgloss.Width(tableHeader(cols, k)); got != want {
+			t.Errorf("header width sorted by %s = %d, want %d", k, got, want)
+		}
 	}
 
 	// Every data line must be exactly as wide as the header, or the columns
@@ -308,6 +312,116 @@ func TestHumanRate(t *testing.T) {
 			}
 			if lipgloss.Width(got) > rateWidth {
 				t.Errorf("humanRate(%v) = %q, wider than the %d-cell rate column", tc.bps, got, rateWidth)
+			}
+		})
+	}
+}
+
+func TestTableHeaderMarksTheSortedColumns(t *testing.T) {
+	tests := []struct {
+		name   string
+		k      SortKey
+		marked []string
+	}{
+		// The rate and total sorts add both directions together, so both of
+		// the columns they read are marked.
+		{name: "rate", k: SortRate, marked: []string{"↓ RATE", "↑ RATE"}},
+		{name: "total", k: SortTotal, marked: []string{"↓ TOTAL", "↑ TOTAL"}},
+		{name: "connections", k: SortConnections, marked: []string{"CONN"}},
+	}
+
+	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP), 100)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			header := tableHeader(cols, tc.k)
+
+			// A marker that does not fit is worse than none at all: pad would
+			// truncate the title it was added to, so the column would lose its
+			// name to gain a mark.
+			if strings.Contains(header, "…") {
+				t.Errorf("the %s marker pushed a title out of its column: %q", tc.k, header)
+			}
+
+			want := make(map[string]bool, len(tc.marked))
+			for _, title := range tc.marked {
+				want[title] = true
+			}
+			for _, c := range cols {
+				got := strings.Contains(header, sortMarker+c.title)
+				if got != want[c.title] {
+					t.Errorf("column %q marked = %v, want %v, in %q", c.title, got, want[c.title], header)
+				}
+			}
+		})
+	}
+}
+
+func TestSortKeyCycle(t *testing.T) {
+	// `s` visits every key and comes back to where it started, so the user can
+	// always get back to a sort by pressing it again rather than having to
+	// remember which other key undoes it.
+	seen := map[SortKey]bool{}
+	k := SortRate
+	for range numSortKeys {
+		if seen[k] {
+			t.Fatalf("the cycle repeats %s before visiting every key", k)
+		}
+		seen[k] = true
+		k = k.next()
+	}
+	if k != SortRate {
+		t.Errorf("the cycle ended on %s, want it wrapped back to %s", k, SortRate)
+	}
+	if len(seen) != int(numSortKeys) {
+		t.Errorf("the cycle visited %d keys, want %d", len(seen), numSortKeys)
+	}
+}
+
+func TestSortKeyToggleRate(t *testing.T) {
+	tests := []struct {
+		name string
+		from SortKey
+		want SortKey
+	}{
+		{name: "rate to total", from: SortRate, want: SortTotal},
+		{name: "total back to rate", from: SortTotal, want: SortRate},
+		// `r` chooses between the two bandwidth numbers, and the connection
+		// count is neither, so it lands on rate rather than doing nothing.
+		{name: "connections lands on rate", from: SortConnections, want: SortRate},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.from.toggleRate(); got != tc.want {
+				t.Errorf("%s.toggleRate() = %s, want %s", tc.from, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSortRowsByKey(t *testing.T) {
+	tests := []struct {
+		name string
+		k    SortKey
+		want []string
+	}{
+		{name: "rate", k: SortRate, want: []string{"412", "980", "22", "-1", "1"}},
+		{name: "total", k: SortTotal, want: []string{"412", "980", "22", "-1", "1"}},
+		{name: "connections", k: SortConnections, want: []string{"412", "980", "-1", "22", "1"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := processRows()
+			sortRows(rows, tc.k)
+
+			got := make([]string, len(rows))
+			for i, r := range rows {
+				got[i] = r.Key
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("sorted by %s = %v, want %v", tc.k, got, tc.want)
 			}
 		})
 	}
