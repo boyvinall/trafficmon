@@ -53,7 +53,10 @@ func (p *Poller) Run(ctx context.Context) error {
 // than patching) is what makes port reuse safe: a recycled port always
 // resolves to its current owner.
 //
-// TODO(milestone 2): for each PID, walk SocketsForPID and index by local port.
+// The map is keyed on local port alone, which is what the capture side can
+// cheaply key on too. Two processes can legitimately hold the same local port
+// on different local addresses (a listener bound per-interface, or SO_REUSEPORT
+// across a worker pool), in which case the last PID walked wins.
 func (p *Poller) poll() error {
 	pids, err := ListPIDs()
 	if err != nil {
