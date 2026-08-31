@@ -10,6 +10,78 @@ package procinfo
 #include <stdlib.h>
 #include <string.h>
 #include <sys/proc_info.h>
+#include <sys/sysctl.h>
+#include <sys/syslimits.h>
+#include <sys/types.h>
+
+// mn_proc_argv0 copies pid's argv[0] into buf (bufsize bytes) via the
+// KERN_PROCARGS2 sysctl -- the same mechanism ps(1) uses for its "comm"
+// column. It returns the number of bytes written (excluding the NUL), or -1
+// if argv could not be read: the pid has already exited, or (without root)
+// it belongs to another user, in which case the kernel hands back the
+// argument space with argv redacted rather than an outright error. Either
+// way the caller falls back to proc_name.
+//
+// This exists because proc_name() only reports the kernel's 16-byte p_comm,
+// the basename of the *executable path* used to exec the process. That can
+// differ sharply from the name the process chooses to present: an
+// updater-style app (Chrome, VS Code, Claude Code's own background workers)
+// commonly execs a version- or hash-named binary on disk while setting
+// argv[0] to a stable, friendly name, e.g. p_comm "2.1.251" vs argv[0]
+// "claude bg-spare".
+static int mn_proc_argv0(pid_t pid, char *buf, size_t bufsize) {
+	int mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };
+	size_t size = 0;
+
+	if (sysctl(mib, 3, NULL, &size, NULL, 0) < 0 || size < sizeof(int)) {
+		return -1;
+	}
+
+	char *procargs = malloc(size);
+	if (procargs == NULL) {
+		return -1;
+	}
+
+	if (sysctl(mib, 3, procargs, &size, NULL, 0) < 0) {
+		free(procargs);
+		return -1;
+	}
+
+	// Layout: argc (int), then the exec path (NUL-terminated), then one or
+	// more NUL bytes of alignment padding, then argv[0], argv[1], ...,
+	// each NUL-terminated in turn.
+	int argc;
+	memcpy(&argc, procargs, sizeof(argc));
+
+	char *cp = procargs + sizeof(argc);
+	char *end = procargs + size;
+
+	while (cp < end && *cp != '\0') {
+		cp++;
+	}
+	while (cp < end && *cp == '\0') {
+		cp++;
+	}
+
+	if (cp >= end || argc < 1) {
+		free(procargs);
+		return -1;
+	}
+
+	size_t len = strnlen(cp, (size_t)(end - cp));
+	if (len == 0) {
+		free(procargs);
+		return -1;
+	}
+	if (len >= bufsize) {
+		len = bufsize - 1;
+	}
+	memcpy(buf, cp, len);
+	buf[len] = '\0';
+
+	free(procargs);
+	return (int)len;
+}
 
 // mn_sock_addrs is a union-free view of the parts of a struct socket_fdinfo we
 // need. Go cannot address C unions -- cgo renders them as opaque byte arrays --
@@ -75,6 +147,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"unsafe"
 )
 
@@ -115,14 +188,37 @@ func ListPIDs() ([]int32, error) {
 	return out, nil
 }
 
-// ProcessName returns the executable name for pid.
+// ProcessName returns the display name for pid: argv[0] as the process
+// itself chose to present it, matching what ps(1) shows in its COMMAND
+// column, with any directory component stripped. This falls back to the
+// kernel's own p_comm (via proc_name) when argv cannot be read -- e.g. pid
+// belongs to another user and we are not root, or it has already exited.
+//
+// Preferring argv[0] matters because p_comm is the basename of the
+// executable *path*, not the name the process presents: self-updating apps
+// routinely exec a version- or hash-named binary while keeping argv[0]
+// stable and friendly, and p_comm alone would surface the former.
 func ProcessName(pid int32) (string, error) {
+	if name, ok := argv0(pid); ok {
+		return filepath.Base(name), nil
+	}
+
 	buf := make([]byte, C.PROC_PIDPATHINFO_MAXSIZE)
 	n, err := C.proc_name(C.int(pid), unsafe.Pointer(&buf[0]), C.uint32_t(len(buf)))
 	if n <= 0 {
 		return "", fmt.Errorf("proc_name(%d): %w", pid, cgoErr(err))
 	}
 	return string(buf[:n]), nil
+}
+
+// argv0 returns pid's argv[0], or ok == false if it could not be read.
+func argv0(pid int32) (name string, ok bool) {
+	buf := make([]byte, C.ARG_MAX)
+	n := C.mn_proc_argv0(C.pid_t(pid), (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	if n <= 0 {
+		return "", false
+	}
+	return string(buf[:n]), true
 }
 
 // Socket describes one open socket fd belonging to a process.

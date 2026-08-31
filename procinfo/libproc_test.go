@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -40,6 +41,37 @@ func TestProcessName(t *testing.T) {
 		t.Fatal("ProcessName returned an empty name")
 	}
 	t.Logf("own process name: %q", name)
+
+	// The test binary's argv[0] is a path (go test builds it under a temp
+	// directory), so a correct implementation must report the basename, not
+	// the whole path.
+	if name != filepath.Base(name) {
+		t.Errorf("ProcessName(own pid) = %q, want a bare name with no directory component", name)
+	}
+}
+
+// TestProcessNameArgv0 asserts that ProcessName prefers argv[0] over the
+// kernel's p_comm, since p_comm is the basename of the executable *path* and
+// can differ sharply from the name a process presents (self-updating apps
+// commonly exec a version- or hash-named binary while keeping argv[0]
+// friendly and stable).
+func TestProcessNameArgv0(t *testing.T) {
+	name, ok := argv0(int32(os.Getpid()))
+	if !ok {
+		t.Fatal("argv0(own pid) failed")
+	}
+	if name == "" {
+		t.Fatal("argv0(own pid) returned an empty string")
+	}
+	t.Logf("own argv[0]: %q", name)
+
+	got, err := ProcessName(int32(os.Getpid()))
+	if err != nil {
+		t.Fatalf("ProcessName: %v", err)
+	}
+	if want := filepath.Base(name); got != want {
+		t.Errorf("ProcessName(own pid) = %q, want basename of argv[0] %q", got, want)
+	}
 }
 
 // closeLater closes c when the test finishes. The error is deliberately
