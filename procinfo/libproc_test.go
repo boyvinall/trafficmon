@@ -3,6 +3,7 @@
 package procinfo
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -235,7 +236,7 @@ func TestPollerPoll(t *testing.T) {
 		t.Fatalf("poll: %v", err)
 	}
 
-	proc, ok := p.Lookup(port)
+	proc, ok := p.Lookup(port, "tcp")
 	if !ok {
 		t.Fatalf("port %d not found in port map of %d entries", port, len(p.Snapshot()))
 	}
@@ -248,5 +249,45 @@ func TestPollerPoll(t *testing.T) {
 
 	if snap := p.Snapshot(); snap[port] != proc {
 		t.Errorf("Snapshot()[%d] = %+v, want %+v", port, snap[port], proc)
+	}
+}
+
+// TestProtoName covers the kind/protocol combinations SocketsForPID can hand
+// it: a TCP-kind socket, an IN-kind socket carrying either protocol number,
+// and an unrecognised protocol. sockInfoTCP/ipprotoTCP/ipprotoUDP are the
+// plain-int mirrors of the C constants, defined alongside protoName so this
+// test does not need to import "C" itself.
+func TestProtoName(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     int
+		protocol int
+		want     string
+	}{
+		{"tcp kind wins regardless of protocol", sockInfoTCP, ipprotoUDP, "tcp"},
+		{"in kind, tcp protocol", sockInfoIn, ipprotoTCP, "tcp"},
+		{"in kind, udp protocol", sockInfoIn, ipprotoUDP, "udp"},
+		{"in kind, unknown protocol", sockInfoIn, -1, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := protoName(tc.kind, tc.protocol); got != tc.want {
+				t.Errorf("protoName(%v, %v) = %q, want %q", tc.kind, tc.protocol, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCgoErr checks both of cgoErr's cases: a nil errno gets replaced with a
+// placeholder rather than passed through, and a real error is returned
+// unchanged.
+func TestCgoErr(t *testing.T) {
+	if err := cgoErr(nil); err == nil {
+		t.Error("cgoErr(nil) = nil, want a non-nil placeholder error")
+	}
+
+	want := errors.New("boom")
+	if got := cgoErr(want); got != want {
+		t.Errorf("cgoErr(%v) = %v, want the same error unchanged", want, got)
 	}
 }

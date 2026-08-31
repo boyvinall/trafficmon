@@ -1,24 +1,40 @@
 package capture
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // loopbackInterface is the name of the macOS loopback device.
 const loopbackInterface = "lo0"
 
+// routeTimeout bounds how long the `route` lookup may block, so a hung or
+// misbehaving binary cannot stall startup forever.
+const routeTimeout = 3 * time.Second
+
+// runRoute invokes `route -n get default` and returns its stdout. It is a
+// variable so tests can substitute a stub and exercise DefaultInterface's
+// fallback path without depending on the host's actual routing table.
+var runRoute = func(ctx context.Context) ([]byte, error) {
+	// `route` writes the answer to stdout and diagnostics to stderr, so only
+	// stdout is parsed. -n keeps it from stalling on reverse DNS.
+	return exec.CommandContext(ctx, "route", "-n", "get", "default").Output()
+}
+
 // DefaultInterface resolves the interface backing the default route, mirroring
 // what `route get default` reports — the same trick iftop uses to pick an
 // interface with no flags given.
 func DefaultInterface() (string, error) {
-	// `route` writes the answer to stdout and diagnostics to stderr, so only
-	// stdout is parsed. -n keeps it from stalling on reverse DNS.
-	out, err := exec.Command("route", "-n", "get", "default").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), routeTimeout)
+	defer cancel()
+
+	out, err := runRoute(ctx)
 	if err == nil {
 		if name, perr := parseRouteInterface(string(out)); perr == nil {
 			return name, nil

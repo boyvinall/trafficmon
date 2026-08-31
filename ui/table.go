@@ -78,6 +78,9 @@ func sortRows(rows []aggregate.Row, k SortKey) {
 // hostname column is the first to be dropped: filtering on the label alone
 // would quietly stop finding hosts by name at exactly the width where the
 // names disappeared. hostname may be nil in views that have no destinations.
+//
+// The result is built into rows[:0], reusing rows' backing array in place, so
+// any other reference to rows is aliased and may be overwritten by this call.
 func filterRows(rows []aggregate.Row, q string, hostname func(aggregate.Row) string) []aggregate.Row {
 	if q == "" {
 		return rows
@@ -182,6 +185,15 @@ type column struct {
 	// marked.
 	sortable bool
 	sortKey  SortKey
+
+	// truncLeft says this column overflowing its width should be truncated
+	// from the front (truncateLeft) rather than the back (truncate). It is set
+	// on PID and CONN: unlike rate/total, which humanRate/humanBytes keep
+	// within their column by construction, these two numbers have no such
+	// bound, and truncating a right-aligned number from the back would drop
+	// its low-order digits — silently producing a different, plausible-looking
+	// number rather than an obviously cut label.
+	truncLeft bool
 }
 
 // tableColumns returns the column set for a view, in display order and before
@@ -204,11 +216,12 @@ func tableColumns(mode Mode, g aggregate.Grouping, hostname func(aggregate.Row) 
 		// The PID only means anything in the by-process rollup; ByDestination
 		// leaves it zero, so showing it there would be actively misleading.
 		cols = append(cols, column{
-			title: "PID",
-			width: pidWidth,
-			align: alignRight,
-			prio:  prioPID,
-			cell:  func(r aggregate.Row) string { return strconv.Itoa(int(r.PID)) },
+			title:     "PID",
+			width:     pidWidth,
+			align:     alignRight,
+			prio:      prioPID,
+			cell:      func(r aggregate.Row) string { return strconv.Itoa(int(r.PID)) },
+			truncLeft: true,
 		})
 	case ModeDestination:
 		cols[labelColumn].title = "HOST"
@@ -269,13 +282,14 @@ func tableColumns(mode Mode, g aggregate.Grouping, hostname func(aggregate.Row) 
 			sortKey:  SortTotal,
 		},
 		column{
-			title:    "CONN",
-			width:    connWidth,
-			align:    alignRight,
-			prio:     prioConnections,
-			cell:     func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
-			sortable: true,
-			sortKey:  SortConnections,
+			title:     "CONN",
+			width:     connWidth,
+			align:     alignRight,
+			prio:      prioConnections,
+			cell:      func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
+			sortable:  true,
+			sortKey:   SortConnections,
+			truncLeft: true,
 		},
 	)
 }
@@ -385,7 +399,7 @@ func tableHeader(cols []column, k SortKey) string {
 		if c.sortable && c.sortKey == k {
 			title = sortMarker + title
 		}
-		cells[i] = pad(title, c.width, c.align)
+		cells[i] = pad(title, c.width, c.align, c.truncLeft)
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
@@ -398,7 +412,7 @@ func tableHeader(cols []column, k SortKey) string {
 func renderRow(r aggregate.Row, cols []column) string {
 	cells := make([]string, len(cols))
 	for i, c := range cols {
-		cells[i] = pad(c.cell(r), c.width, c.align)
+		cells[i] = pad(c.cell(r), c.width, c.align, c.truncLeft)
 	}
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
@@ -414,9 +428,14 @@ func renderRows(rows []aggregate.Row, cols []column) []string {
 }
 
 // pad lays s into a cell of exactly w display cells, against the requested
-// side, truncating first if it does not fit.
-func pad(s string, w int, a alignment) string {
-	s = truncate(s, w)
+// side, truncating first if it does not fit. truncLeft selects truncateLeft
+// over truncate for that first step — see column.truncLeft.
+func pad(s string, w int, a alignment, truncLeft bool) string {
+	if truncLeft {
+		s = truncateLeft(s, w)
+	} else {
+		s = truncate(s, w)
+	}
 
 	gap := w - lipgloss.Width(s)
 	if gap <= 0 {
@@ -435,6 +454,29 @@ func pad(s string, w int, a alignment) string {
 // would push every following row down by a line and break the alignment of the
 // columns to its right.
 func truncate(s string, w int) string {
+	return truncateSide(s, w, false)
+}
+
+// truncateLeft shortens s to at most w display cells by dropping runes from
+// the front rather than the back, marking the cut with a leading ellipsis.
+//
+// It exists for the breadcrumb, where the end of the string is the part worth
+// keeping: the innermost scope is the one the rows on screen are actually
+// filtered by, and the levels above it are context the user can recover by
+// pressing esc.
+func truncateLeft(s string, w int) string {
+	return truncateSide(s, w, true)
+}
+
+// truncateSide is the rune-width-budget algorithm shared by truncate and
+// truncateLeft: keep runes from one end of s up to a budget of w-1 display
+// cells, and mark the runes dropped off the other end with an ellipsis.
+//
+// left runs the walk from the back of s instead of the front — reversing the
+// runes first, keeping from the (now leading) end, then reversing the kept
+// runes back is the same thing as walking from the end directly, so
+// truncateLeft needs no separate loop of its own.
+func truncateSide(s string, w int, left bool) string {
 	if w <= 0 {
 		return ""
 	}
@@ -447,51 +489,37 @@ func truncate(s string, w int) string {
 
 	// Measure rune by rune rather than slicing bytes: process names and IPv6
 	// addresses are usually ASCII, but nothing guarantees it.
-	var b strings.Builder
+	runes := []rune(s)
+	if left {
+		reverseRunes(runes)
+	}
+
+	var kept []rune
 	used := 0
-	for _, r := range s {
+	for _, r := range runes {
 		rw := lipgloss.Width(string(r))
 		if used+rw > w-1 {
 			break
 		}
-		b.WriteRune(r)
+		kept = append(kept, r)
 		used += rw
 	}
-	return b.String() + "…"
+
+	if left {
+		reverseRunes(kept)
+		return "…" + string(kept)
+	}
+	return string(kept) + "…"
 }
 
-// truncateLeft shortens s to at most w display cells by dropping runes from
-// the front rather than the back, marking the cut with a leading ellipsis.
-//
-// It exists for the breadcrumb, where the end of the string is the part worth
-// keeping: the innermost scope is the one the rows on screen are actually
-// filtered by, and the levels above it are context the user can recover by
-// pressing esc.
-func truncateLeft(s string, w int) string {
-	if w <= 0 {
-		return ""
+// reverseRunes reverses runes in place.
+func reverseRunes(runes []rune) {
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
 	}
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	if w == 1 {
-		return "…"
-	}
-
-	runes := []rune(s)
-	used, i := 0, len(runes)
-	for i > 0 {
-		rw := lipgloss.Width(string(runes[i-1]))
-		if used+rw > w-1 {
-			break
-		}
-		used += rw
-		i--
-	}
-	return "…" + string(runes[i:])
 }
 
-// humanBytes formats a byte count for display, e.g. "128 MB".
+// humanBytes formats a byte count for display, e.g. "128.0 MB".
 func humanBytes(n uint64) string {
 	const unit = 1024
 	if n < unit {

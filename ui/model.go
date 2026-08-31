@@ -94,6 +94,11 @@ type Model struct {
 	// so the two can never drift apart from the bindings Update acts on.
 	help help.Model
 
+	// stack is a pointer, not a value, even though Model is otherwise passed
+	// and returned by value throughout: the drill-down position is logically
+	// per-session state, not per-copy, so every Model derived from the same
+	// NewModel call is meant to keep sharing it. Do not assume the rest of
+	// Model's value semantics extend to it.
 	stack    *Stack
 	grouping aggregate.Grouping
 	sort     SortKey
@@ -220,6 +225,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilterKey(msg)
 	}
 
+	// While the help overlay has the screen, it claims the keyboard the same
+	// way: everything a normal keypress would act on — the cursor, mode,
+	// grouping, the filter — is out of sight underneath it, so only leaving
+	// the program or closing the overlay make sense. Back is included because
+	// it is Esc or Backspace, and either should dismiss help rather than
+	// falling through to drill out of whatever scope sits under it.
+	if m.showHelp {
+		switch {
+		case key.Matches(msg, m.keys.Quit):
+			return m, tea.Quit
+		case key.Matches(msg, m.keys.Help), key.Matches(msg, m.keys.Back):
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -256,7 +277,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setSort(m.sort.toggleRate())
 
 	case key.Matches(msg, m.keys.Filter):
-		m.openFilter()
+		return m, m.openFilter()
 
 	case key.Matches(msg, m.keys.Pause):
 		m.paused = !m.paused
@@ -309,18 +330,21 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // commonest thing to do next — type a new filter — needs no clearing first,
 // and so that committing an empty input is a plain, discoverable way to take a
 // filter off again.
-func (m *Model) openFilter() {
+func (m *Model) openFilter() tea.Cmd {
 	m.filterBefore = m.filter
 	m.filtering = true
 
 	m.input.SetValue("")
 
-	// Focus hands back a command to start the cursor blinking, which the
-	// static cursor NewModel configures never needs; it is nil here.
-	m.input.Focus()
+	// Focus's returned command starts the cursor blinking, which the static
+	// cursor NewModel configures never needs in practice — but it is threaded
+	// back to the caller anyway rather than assumed nil, so a future change to
+	// that configuration cannot silently drop a command Bubble Tea expects.
+	cmd := m.input.Focus()
 
 	m.filter = ""
 	m.rebuild()
+	return cmd
 }
 
 // commitFilter accepts what was typed and returns the keyboard to the table.
@@ -464,6 +488,12 @@ func (m *Model) setSort(k SortKey) {
 // refresh pulls a fresh snapshot from the aggregator and rebuilds the table
 // from it.
 func (m *Model) refresh(now time.Time) {
+	// Test fixtures routinely build a Model with no live aggregator behind it,
+	// so a tick reaching one must do nothing rather than panic.
+	if m.agg == nil {
+		return
+	}
+
 	m.snap = m.agg.Refresh(now)
 	m.now = now
 	m.rebuild()

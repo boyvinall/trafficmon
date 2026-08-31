@@ -16,6 +16,7 @@ const (
 	ProtoUDP
 )
 
+// String returns the lowercase name of p, or "?" for an unrecognised value.
 func (p Proto) String() string {
 	switch p {
 	case ProtoTCP:
@@ -38,6 +39,7 @@ type FlowKey struct {
 	Proto      Proto
 }
 
+// String renders k as "proto local:port -> remote:port", for logging.
 func (k FlowKey) String() string {
 	return fmt.Sprintf("%s %s:%d -> %s:%d",
 		k.Proto,
@@ -114,7 +116,12 @@ func (c *ByteCounter) Add(now time.Time, n uint64, inbound bool) {
 		c.bytesOut += n
 		c.out[c.head] += n
 	}
-	c.lastSeen = now
+	// Only advance: packets can arrive out of order, and letting one with an
+	// earlier timestamp move lastSeen backwards would confuse Evict's
+	// staleness check.
+	if now.After(c.lastSeen) {
+		c.lastSeen = now
+	}
 }
 
 // Totals returns the cumulative bytes in and out since process start.

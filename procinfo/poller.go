@@ -17,17 +17,27 @@ type Process struct {
 	Name string
 }
 
+// portKey identifies a bound local port together with its transport
+// protocol. Two unrelated processes can legitimately hold the same port
+// number on different protocols (say a resolver on UDP/53 alongside a server
+// on TCP/53); keying on the number alone would let one silently overwrite the
+// other in the map.
+type portKey struct {
+	port  uint16
+	proto string
+}
+
 // Poller periodically rebuilds the local-port to process mapping.
 type Poller struct {
 	mu    sync.RWMutex
-	ports map[uint16]Process
-	names map[int32]string // cache: PID to executable name
+	ports map[portKey]Process
+	names map[int32]string // cache: PID to executable name, pruned each poll
 }
 
 // NewPoller returns an idle Poller. Call Run to start polling.
 func NewPoller() *Poller {
 	return &Poller{
-		ports: make(map[uint16]Process),
+		ports: make(map[portKey]Process),
 		names: make(map[int32]string),
 	}
 }
@@ -49,24 +59,35 @@ func (p *Poller) Run(ctx context.Context) error {
 	}
 }
 
-// poll rebuilds the port map from scratch. Building fresh each time (rather
-// than patching) is what makes port reuse safe: a recycled port always
-// resolves to its current owner.
+// poll rebuilds both the port map and the process-name cache from scratch.
+// Building the port map fresh (rather than patching) is what makes port reuse
+// safe: a recycled port always resolves to its current owner. The name cache
+// is pruned the same way each poll, keeping only the PIDs seen in this walk,
+// so a PID that has since exited does not go on lending its old name to
+// whatever reuses that number next.
 //
-// The map is keyed on local port alone, which is what the capture side can
-// cheaply key on too. Two processes can legitimately hold the same local port
-// on different local addresses (a listener bound per-interface, or SO_REUSEPORT
+// The map is keyed on local port and protocol: two processes can legitimately
+// hold the same port number on different protocols (UDP/53 vs TCP/53), and
+// keying on the number alone would let one silently clobber the other. Two
+// processes can also legitimately hold the same port and protocol on
+// different local addresses (a listener bound per-interface, or SO_REUSEPORT
 // across a worker pool), in which case the last PID walked wins.
+//
+// The PID/fd walk itself runs without holding the lock; only the final map
+// swap takes the exclusive lock, so a Lookup/Snapshot reader is blocked for a
+// map assignment rather than the whole sweep.
 func (p *Poller) poll() error {
 	pids, err := ListPIDs()
 	if err != nil {
 		return err
 	}
 
-	ports := make(map[uint16]Process, len(p.ports))
+	p.mu.RLock()
+	oldNames := p.names
+	p.mu.RUnlock()
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	ports := make(map[portKey]Process, len(pids))
+	names := make(map[int32]string, len(oldNames))
 
 	for _, pid := range pids {
 		socks, err := SocketsForPID(pid)
@@ -79,40 +100,54 @@ func (p *Poller) poll() error {
 			continue
 		}
 
-		name, ok := p.names[pid]
+		name, ok := oldNames[pid]
 		if !ok {
-			if name, err = ProcessName(pid); err != nil {
+			if resolved, err := ProcessName(pid); err == nil {
+				name = resolved
+			} else {
 				name = "?"
 			}
-			p.names[pid] = name
+		}
+		// Only a resolved name is carried into the next poll: caching "?"
+		// would turn one transient lookup failure into a permanent one for
+		// the life of the PID.
+		if name != "?" {
+			names[pid] = name
 		}
 
 		for _, s := range socks {
-			ports[s.LocalPort] = Process{PID: pid, Name: name}
+			ports[portKey{port: s.LocalPort, proto: s.Proto}] = Process{PID: pid, Name: name}
 		}
 	}
 
+	p.mu.Lock()
 	p.ports = ports
+	p.names = names
+	p.mu.Unlock()
+
 	return nil
 }
 
-// Lookup returns the process currently owning localPort.
-func (p *Poller) Lookup(localPort uint16) (Process, bool) {
+// Lookup returns the process currently owning localPort for the given
+// transport protocol.
+func (p *Poller) Lookup(localPort uint16, proto string) (Process, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	proc, ok := p.ports[localPort]
+	proc, ok := p.ports[portKey{port: localPort, proto: proto}]
 	return proc, ok
 }
 
 // Snapshot returns a copy of the current port map for the aggregator to join
-// against.
+// against. The result is keyed on port number alone, so if two processes hold
+// the same port on different protocols only one is represented; Lookup, which
+// takes the protocol into account, does not have that limitation.
 func (p *Poller) Snapshot() map[uint16]Process {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	out := make(map[uint16]Process, len(p.ports))
 	for k, v := range p.ports {
-		out[k] = v
+		out[k.port] = v
 	}
 	return out
 }

@@ -80,6 +80,41 @@ func TestRateWindowMatchesBucketCount(t *testing.T) {
 	}
 }
 
+func TestProtoString(t *testing.T) {
+	tests := []struct {
+		name string
+		p    Proto
+		want string
+	}{
+		{name: "tcp", p: ProtoTCP, want: "tcp"},
+		{name: "udp", p: ProtoUDP, want: "udp"},
+		{name: "unrecognised value", p: Proto(255), want: "?"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.p.String(); got != tt.want {
+				t.Errorf("Proto(%d).String() = %q, want %q", tt.p, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFlowKeyString(t *testing.T) {
+	key := FlowKey{
+		LocalAddr:  mustAddr(t, "192.168.1.10"),
+		LocalPort:  51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"),
+		RemotePort: 443,
+		Proto:      ProtoTCP,
+	}
+
+	want := "tcp 192.168.1.10:51000 -> 140.82.112.3:443"
+	if got := key.String(); got != want {
+		t.Errorf("FlowKey.String() = %q, want %q", got, want)
+	}
+}
+
 // mustAddr parses a literal IP address for tests, failing loudly on a typo.
 func mustAddr(t *testing.T, s string) netip.Addr {
 	t.Helper()

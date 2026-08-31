@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/netip"
 	"sync"
 	"time"
@@ -59,9 +60,17 @@ func New(cfg Config) *Capturer {
 	}
 }
 
-// Run opens the interface and decodes packets into the flow table until ctx is
-// cancelled, at which point it returns ctx.Err().
+// Run opens the interface and decodes packets into the flow table. If ctx is
+// cancelled or its deadline expires, Run returns ctx.Err(); it can also
+// return earlier than that with a different error — an invalid SnapLen, a
+// failure to open the interface or set the BPF filter, an unsupported link
+// type, or a read error (including the handle reaching EOF) all cause it to
+// return before ctx is done.
 func (c *Capturer) Run(ctx context.Context) error {
+	if c.cfg.SnapLen < 1 || c.cfg.SnapLen > math.MaxInt32 {
+		return fmt.Errorf("SnapLen %d out of range [1, %d]", c.cfg.SnapLen, math.MaxInt32)
+	}
+
 	ifaces := []string{c.cfg.Interface}
 	if c.cfg.IncludeLoopback && c.cfg.Interface != loopbackInterface {
 		// Loopback traffic never reaches the primary interface, so it needs a
@@ -175,17 +184,32 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) {
 // packet arriving on an evicted flow afterwards simply starts a fresh counter,
 // which is the same thing the UI would show for a brand new connection.
 func (c *Capturer) Evict(before time.Time) int {
+	// Snapshot the candidate keys under a read lock first: LastSeen on every
+	// counter would otherwise serialise against the write lock the hot record
+	// path also needs, for the whole sweep rather than just the deletions.
+	c.mu.RLock()
+	stale := make([]FlowKey, 0, len(c.flows))
+	for k, ctr := range c.flows {
+		if ctr.LastSeen().Before(before) {
+			stale = append(stale, k)
+		}
+	}
+	c.mu.RUnlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	n := 0
-	for k, ctr := range c.flows {
-		// LastSeen takes the counter's own lock, in the same map-then-counter
-		// order Snapshot uses, so the two cannot deadlock against each other.
-		if ctr.LastSeen().Before(before) {
-			delete(c.flows, k)
-			n++
+	for _, k := range stale {
+		// Re-check staleness under the write lock: a flow may have seen a
+		// packet between the snapshot above and taking this lock, and that
+		// activity must not be discarded.
+		ctr, ok := c.flows[k]
+		if !ok || !ctr.LastSeen().Before(before) {
+			continue
 		}
+		delete(c.flows, k)
+		n++
 	}
 	return n
 }

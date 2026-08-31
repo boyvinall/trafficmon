@@ -43,6 +43,9 @@ type Frame struct {
 
 // Stack is the drill-down history. The bottom frame is always the unfiltered
 // top-level view; drilling pushes, esc pops.
+//
+// The zero value is not usable: Top and Depth both assume the bottom frame
+// NewStack seeds is always present. Construct a Stack with NewStack.
 type Stack struct {
 	frames []Frame
 }
@@ -167,7 +170,7 @@ func destinationFrame(r aggregate.Row, g aggregate.Grouping) Frame {
 		Label: "Destination: " + label,
 		Scope: "dst:" + label,
 		Filter: func(s aggregate.Snapshot) aggregate.Snapshot {
-			return aggregate.FilterByDestination(s, addr, port, withPort)
+			return aggregate.FilterByDestination(s, addr, port, g)
 		},
 	}
 }

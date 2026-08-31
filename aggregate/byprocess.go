@@ -8,29 +8,23 @@ import "strconv"
 // a name, and a name can change under a PID, whereas the PID is what the
 // drill-down filters on.
 func ByProcess(snap Snapshot) []Row {
-	return rollup(snap.Connections, func(c ConnectionRecord) (string, Row) {
-		key := strconv.Itoa(int(c.PID))
-		return key, Row{
-			Key:   key,
-			Label: c.ProcessName,
-			PID:   c.PID,
-		}
-	})
+	return rollup(snap.Connections,
+		func(c ConnectionRecord) string { return strconv.Itoa(int(c.PID)) },
+		func(c ConnectionRecord, key string) Row {
+			return Row{Key: key, Label: c.ProcessName, PID: c.PID}
+		},
+	)
 }
 
 // FilterByDestination narrows a snapshot to the connections talking to one
-// remote host, for the destination-to-process drill-down.
-func FilterByDestination(snap Snapshot, remoteAddr string, remotePort uint16, withPort bool) Snapshot {
-	out := snap
-	out.Connections = nil
-	for _, c := range snap.Connections {
+// remote host, for the destination-to-process drill-down. remotePort is only
+// checked when g is GroupByIPPort, matching the granularity the drilled-into
+// row was grouped at.
+func FilterByDestination(snap Snapshot, remoteAddr string, remotePort uint16, g Grouping) Snapshot {
+	return filter(snap, func(c ConnectionRecord) bool {
 		if c.RemoteAddr != remoteAddr {
-			continue
+			return false
 		}
-		if withPort && c.RemotePort != remotePort {
-			continue
-		}
-		out.Connections = append(out.Connections, c)
-	}
-	return out
+		return g != GroupByIPPort || c.RemotePort == remotePort
+	})
 }

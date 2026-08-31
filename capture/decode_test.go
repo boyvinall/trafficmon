@@ -107,6 +107,36 @@ func TestFlowDecoderDecode(t *testing.T) {
 			},
 		},
 		{
+			name:     "raw ipv4 tcp",
+			linkType: layers.LinkTypeRaw,
+			data:     serialize(t, ipv4(layers.IPProtocolTCP), tcp, payload),
+			want: packetInfo{
+				Src: mustAddr(t, "192.168.1.10"), Dst: mustAddr(t, "140.82.112.3"),
+				SrcPort: 51000, DstPort: 443, Proto: ProtoTCP,
+				Bytes: 20 + 20 + 100,
+			},
+		},
+		{
+			name:     "ipv4 link type is treated the same as raw",
+			linkType: layers.LinkTypeIPv4,
+			data:     serialize(t, ipv4(layers.IPProtocolUDP), udp, payload),
+			want: packetInfo{
+				Src: mustAddr(t, "192.168.1.10"), Dst: mustAddr(t, "140.82.112.3"),
+				SrcPort: 5353, DstPort: 53, Proto: ProtoUDP,
+				Bytes: 20 + 8 + 100,
+			},
+		},
+		{
+			name:     "native ipv6 link type tcp",
+			linkType: layers.LinkTypeIPv6,
+			data:     serialize(t, ipv6(layers.IPProtocolTCP), tcp, payload),
+			want: packetInfo{
+				Src: mustAddr(t, "2001:db8::1"), Dst: mustAddr(t, "2606:4700::1111"),
+				SrcPort: 51000, DstPort: 443, Proto: ProtoTCP,
+				Bytes: 40 + 20 + 100,
+			},
+		},
+		{
 			name:     "vlan tagged ipv4 tcp",
 			linkType: layers.LinkTypeEthernet,
 			data: serialize(t,

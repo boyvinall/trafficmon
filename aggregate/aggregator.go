@@ -33,20 +33,36 @@ var UnknownProcess = procinfo.Process{PID: -1, Name: "unknown"}
 // ConnectionRecord is one joined flow: byte counters plus the process that
 // owned the local port at join time.
 type ConnectionRecord struct {
-	PID         int32
+	// PID is the process currently attributed to the flow, or
+	// UnknownProcess.PID when no polled socket owns the local port.
+	PID int32
+	// ProcessName is the executable name of PID, or UnknownProcess.Name when
+	// unattributed.
 	ProcessName string
 
-	LocalAddr  string
-	LocalPort  uint16
+	// LocalPort is the local end of the flow. It only serves to key and order
+	// records pre-rollup; neither ByProcess nor ByDestination carries it into a
+	// Row.
+	LocalPort uint16
+	// RemoteAddr is the remote host the flow talks to, in string form so it can
+	// double as a Row key without reparsing.
 	RemoteAddr string
+	// RemotePort is the remote port the flow talks to.
 	RemotePort uint16
-	Proto      string
+	// Proto is the flow's transport protocol, e.g. "tcp" or "udp".
+	Proto string
 
+	// BytesInTotal and BytesOutTotal are the flow's cumulative byte counters as
+	// reported by the capture side.
 	BytesInTotal  uint64
 	BytesOutTotal uint64
-	RateInBps     float64
-	RateOutBps    float64
+	// RateInBps and RateOutBps are the flow's current throughput, in bytes per
+	// second.
+	RateInBps  float64
+	RateOutBps float64
 
+	// LastSeen is when the flow last carried traffic. It drives Closed and the
+	// grace-period eviction in Aggregator.join.
 	LastSeen time.Time
 }
 
@@ -114,8 +130,25 @@ func (r Row) Closed(now time.Time) bool {
 
 // Snapshot is everything the UI needs for one frame.
 type Snapshot struct {
+	// At is when the snapshot was taken. No production code reads it back —
+	// it exists for tests and fixtures that want a timestamped Snapshot to
+	// build on.
 	At          time.Time
 	Connections []ConnectionRecord
+}
+
+// filter narrows snap to the connections keep reports true for. It is the
+// shared implementation behind FilterByProcess and FilterByDestination, which
+// differ only in what keep checks.
+func filter(snap Snapshot, keep func(ConnectionRecord) bool) Snapshot {
+	out := snap
+	out.Connections = nil
+	for _, c := range snap.Connections {
+		if keep(c) {
+			out.Connections = append(out.Connections, c)
+		}
+	}
+	return out
 }
 
 // Aggregator owns the shared state written by the capture and poller
@@ -124,12 +157,14 @@ type Aggregator struct {
 	cap  *capture.Capturer
 	poll *procinfo.Poller
 
-	mu sync.RWMutex
+	// mu guards records. It is a plain Mutex, not an RWMutex: join is the only
+	// method that ever touches records, and it always writes, so there is no
+	// read-only path to give a separate RLock.
+	mu sync.Mutex
 	// records is the previous join result, keyed by flow. Retaining it across
 	// refreshes is what lets a connection whose owning process has already
 	// exited keep its name for the rest of its grace period.
 	records map[capture.FlowKey]ConnectionRecord
-	last    Snapshot
 }
 
 // New wires an Aggregator to its two data sources.
@@ -156,7 +191,7 @@ func (a *Aggregator) Refresh(now time.Time) Snapshot {
 
 // join matches every captured flow to the process that currently owns its
 // local port, ages out whatever has been quiet for longer than GracePeriod,
-// and publishes the result as the latest snapshot.
+// and returns the resulting snapshot.
 //
 // It takes both maps as arguments rather than reading them from the two
 // sources so that the join — where all the interesting cases live — can be
@@ -179,7 +214,6 @@ func (a *Aggregator) join(flows map[capture.FlowKey]capture.FlowStats, ports map
 		records[key] = ConnectionRecord{
 			PID:           proc.PID,
 			ProcessName:   proc.Name,
-			LocalAddr:     key.LocalAddr.String(),
 			LocalPort:     key.LocalPort,
 			RemoteAddr:    key.RemoteAddr.String(),
 			RemotePort:    key.RemotePort,
@@ -202,9 +236,7 @@ func (a *Aggregator) join(flows map[capture.FlowKey]capture.FlowStats, ports map
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].less(list[j]) })
 
-	snap := Snapshot{At: now, Connections: list}
-	a.last = snap
-	return snap
+	return Snapshot{At: now, Connections: list}
 }
 
 // attribute resolves the process owning a flow's local port. Caller must hold
@@ -230,32 +262,29 @@ func (a *Aggregator) attribute(key capture.FlowKey, ports map[uint16]procinfo.Pr
 	return UnknownProcess
 }
 
-// Latest returns the most recent snapshot without recomputing it — used when
-// the UI is paused.
-func (a *Aggregator) Latest() Snapshot {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.last
-}
-
-// rollup groups records into rows and sums their counters. seed maps a record
-// to its row key and to the row that key starts life as; everything after that
-// is pure accumulation.
+// rollup groups records into rows and sums their counters. key maps a record
+// to its row key; seed builds the row that key starts life as, and runs only
+// on that key's first occurrence — everything after that is pure accumulation
+// through the row already in rows.
 //
 // Rows come out in order of first appearance, and the join has already sorted
 // the records, so the row order is stable from frame to frame even before the
 // UI applies its own sort.
-func rollup(records []ConnectionRecord, seed func(ConnectionRecord) (string, Row)) []Row {
+func rollup(records []ConnectionRecord, key func(ConnectionRecord) string, seed func(ConnectionRecord, string) Row) []Row {
 	index := make(map[string]int, len(records))
+	// rows is pre-sized to cap(records), and the number of distinct keys can
+	// never exceed the number of records, so the append below never grows past
+	// that capacity and never reallocates — which is what makes it safe to keep
+	// holding &rows[i] and mutating through it across later iterations.
 	rows := make([]Row, 0, len(records))
 
 	for _, c := range records {
-		key, row := seed(c)
-		i, ok := index[key]
+		k := key(c)
+		i, ok := index[k]
 		if !ok {
 			i = len(rows)
-			index[key] = i
-			rows = append(rows, row)
+			index[k] = i
+			rows = append(rows, seed(c, k))
 		}
 
 		r := &rows[i]

@@ -80,11 +80,41 @@ type Resolver struct {
 	// making a real DNS query.
 	lookup  func(ctx context.Context, addr string) ([]string, error)
 	timeout time.Duration
+
+	// maxConcurrent and maxCacheEntries mirror the package constants of the
+	// same name, defaulted from them in NewResolverWith and overridable via
+	// Option. They are plain fields rather than the constants directly so
+	// that an Option can change them per Resolver.
+	maxConcurrent   int
+	maxCacheEntries int
+}
+
+// Option overrides one of a Resolver's tunables from its default. See
+// WithLookupTimeout, WithMaxConcurrent and WithMaxCacheEntries.
+type Option func(*Resolver)
+
+// WithLookupTimeout overrides lookupTimeout, the bound on a single reverse
+// query.
+func WithLookupTimeout(d time.Duration) Option {
+	return func(r *Resolver) { r.timeout = d }
+}
+
+// WithMaxConcurrent overrides maxConcurrent, the number of reverse queries
+// allowed in flight at once.
+func WithMaxConcurrent(n int) Option {
+	return func(r *Resolver) { r.maxConcurrent = n }
+}
+
+// WithMaxCacheEntries overrides maxCacheEntries, the size of one generation
+// of the cache. See put for why that bounds the whole thing at twice this
+// number.
+func WithMaxCacheEntries(n int) Option {
+	return func(r *Resolver) { r.maxCacheEntries = n }
 }
 
 // NewResolver returns an empty resolver that asks the system resolver.
-func NewResolver() *Resolver {
-	return NewResolverWith(net.DefaultResolver.LookupAddr)
+func NewResolver(opts ...Option) *Resolver {
+	return NewResolverWith(net.DefaultResolver.LookupAddr, opts...)
 }
 
 // NewResolverWith returns an empty resolver that runs its queries through
@@ -95,15 +125,24 @@ func NewResolver() *Resolver {
 // the suite happens to run on, so a test that used the real resolver would be
 // testing the network. It is exported because the callers that have to be
 // tested this way — the render loop among them — live in other packages.
-func NewResolverWith(lookup func(ctx context.Context, addr string) ([]string, error)) *Resolver {
-	return &Resolver{
-		cur:      make(map[string]result),
-		prev:     make(map[string]result),
-		inflight: make(map[string]struct{}),
-		sem:      make(chan struct{}, maxConcurrent),
-		lookup:   lookup,
-		timeout:  lookupTimeout,
+//
+// opts override the package defaults for lookup timeout, concurrency and
+// cache size; callers that pass none get the current constants.
+func NewResolverWith(lookup func(ctx context.Context, addr string) ([]string, error), opts ...Option) *Resolver {
+	r := &Resolver{
+		cur:             make(map[string]result),
+		prev:            make(map[string]result),
+		inflight:        make(map[string]struct{}),
+		lookup:          lookup,
+		timeout:         lookupTimeout,
+		maxConcurrent:   maxConcurrent,
+		maxCacheEntries: maxCacheEntries,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	r.sem = make(chan struct{}, r.maxConcurrent)
+	return r
 }
 
 // Lookup returns the cached hostname for ip if one is known, and otherwise
@@ -206,8 +245,8 @@ func (r *Resolver) get(ip string) (result, bool) {
 // aggregator evicts a flow seconds after it goes quiet, but a name is worth
 // keeping long after that, since the same host is usually talked to again.
 func (r *Resolver) put(ip string, res result) {
-	if len(r.cur) >= maxCacheEntries {
-		r.prev, r.cur = r.cur, make(map[string]result, maxCacheEntries)
+	if len(r.cur) >= r.maxCacheEntries {
+		r.prev, r.cur = r.cur, make(map[string]result, r.maxCacheEntries)
 	}
 	r.cur[ip] = res
 }

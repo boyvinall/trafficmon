@@ -1,4 +1,13 @@
+.*
+!.gitignore
+!.github
+!.claude
+!.golangci.yml
+
 bin/
 dist/
 *.test
 *.out
+
+*.md
+!README.md

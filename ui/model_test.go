@@ -259,6 +259,57 @@ func TestSelectedRowIsHighlighted(t *testing.T) {
 	}
 }
 
+// sgrCodes returns the numeric parameters of the first SGR escape sequence in
+// s, so a test can assert an attribute is present without depending on the
+// order lipgloss happens to combine them in.
+func sgrCodes(t *testing.T, s string) map[string]bool {
+	t.Helper()
+
+	seq := ansiPattern.FindString(s)
+	if seq == "" {
+		t.Fatalf("no ANSI escape sequence in %q", s)
+	}
+
+	body := strings.TrimSuffix(strings.TrimPrefix(seq, "\x1b["), "m")
+	codes := make(map[string]bool)
+	for _, c := range strings.Split(body, ";") {
+		codes[c] = true
+	}
+	return codes
+}
+
+// TestDefaultStylesRenderTheirAttributes checks the styles beyond Closed and
+// Selected — which the row-rendering tests already exercise — actually carry
+// the attributes their doc comments claim.
+func TestDefaultStylesRenderTheirAttributes(t *testing.T) {
+	withANSI(t)
+	s := DefaultStyles()
+
+	tests := []struct {
+		name  string
+		style lipgloss.Style
+		codes []string // SGR codes: 1 bold, 2 faint, 4 underline, 7 reverse
+	}{
+		{name: "Header is bold", style: s.Header, codes: []string{"1"}},
+		{name: "Breadcrumb is faint", style: s.Breadcrumb, codes: []string{"2"}},
+		{name: "Footer is faint", style: s.Footer, codes: []string{"2"}},
+		{name: "ColumnHeader is bold and underlined", style: s.ColumnHeader, codes: []string{"1", "4"}},
+		{name: "Paused is bold and reversed", style: s.Paused, codes: []string{"1", "7"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rendered := tc.style.Render("x")
+			got := sgrCodes(t, rendered)
+			for _, code := range tc.codes {
+				if !got[code] {
+					t.Errorf("%s: rendered %q missing SGR code %q", tc.name, rendered, code)
+				}
+			}
+		})
+	}
+}
+
 func TestVisibleWindow(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -740,6 +791,19 @@ func TestUpdateTickRefreshes(t *testing.T) {
 	}
 	if len(m.rows) != 0 {
 		t.Errorf("rows = %v, want them rebuilt from the (empty) snapshot", rowLabels(m))
+	}
+}
+
+func TestInitStartsTheTicker(t *testing.T) {
+	m := newTestModel(processRows(), 100, 12)
+
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatalf("Init returned no command, so the render loop would never start")
+	}
+
+	if _, ok := cmd().(tickMsg); !ok {
+		t.Errorf("Init's command did not produce a tickMsg")
 	}
 }
 
@@ -1397,6 +1461,94 @@ func TestFilterInputCtrlCStillQuits(t *testing.T) {
 	_, cmd := press(t, m, "ctrl+c")
 	if cmd == nil {
 		t.Errorf("ctrl+c while filtering did not quit")
+	}
+}
+
+func TestHelpOverlayClosesWithQuestionMarkOrEsc(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "same key toggles it off", key: "?"},
+		{name: "esc also dismisses it", key: "esc"},
+		// Back is bound to both esc and backspace, and the bug this guards
+		// against only showed up on the second of the two: esc happened to be
+		// special-cased already, backspace fell through to drillOut.
+		{name: "backspace also dismisses it, being the other half of Back", key: "backspace"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := press(t, newLiveModel(), "?")
+			if !m.showHelp {
+				t.Fatalf("? did not open the help overlay")
+			}
+
+			m, _ = press(t, m, tc.key)
+			if m.showHelp {
+				t.Errorf("%q did not close the help overlay", tc.key)
+			}
+		})
+	}
+}
+
+// TestHelpOverlayIgnoresEverythingElse checks that the keys which normally
+// change the model are no-ops while help is showing: everything underneath
+// the overlay is out of sight, so acting on it would change a view the user
+// cannot see.
+func TestHelpOverlayIgnoresEverythingElse(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "cursor movement", key: "j"},
+		{name: "pause", key: "p"},
+		{name: "mode toggle", key: "tab"},
+		{name: "filter", key: "/"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := press(t, newLiveModel(), "?")
+			if !m.showHelp {
+				t.Fatalf("? did not open the help overlay")
+			}
+			before := modelState(m, nil)
+
+			m, cmd := press(t, m, tc.key)
+
+			if !m.showHelp {
+				t.Errorf("%q closed the help overlay, want it to stay open", tc.key)
+			}
+			if got := modelState(m, cmd); got != before {
+				t.Errorf("%q changed the model while help was open:\n%s\nwant:\n%s", tc.key, got, before)
+			}
+		})
+	}
+}
+
+func TestEscClosesHelpRatherThanDrillingOut(t *testing.T) {
+	// esc is also the Back binding, which pops the drill stack. While help is
+	// showing, esc must dismiss the overlay instead of acting on whatever is
+	// underneath it — otherwise closing help would silently drill out too.
+	m := newLiveModel()
+	m.cursor = 1 // Google Chrome Helper
+	m, _ = press(t, m, "enter")
+	if m.stack.Depth() != 1 {
+		t.Fatalf("setup: depth = %d, want 1", m.stack.Depth())
+	}
+
+	m, _ = press(t, m, "?")
+	if !m.showHelp {
+		t.Fatalf("? did not open the help overlay")
+	}
+
+	m, _ = press(t, m, "esc")
+	if m.showHelp {
+		t.Errorf("esc did not close the help overlay")
+	}
+	if m.stack.Depth() != 1 {
+		t.Errorf("depth = %d, want esc to leave the drill stack untouched while closing help", m.stack.Depth())
 	}
 }
 

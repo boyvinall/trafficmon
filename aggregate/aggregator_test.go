@@ -1,7 +1,9 @@
 package aggregate
 
 import (
+	"fmt"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,7 +15,7 @@ import (
 // looks at it beyond copying it into the record.
 const localAddr = "192.168.1.10"
 
-func mustAddr(t *testing.T, s string) netip.Addr {
+func mustAddr(t testing.TB, s string) netip.Addr {
 	t.Helper()
 	a, err := netip.ParseAddr(s)
 	if err != nil {
@@ -22,8 +24,9 @@ func mustAddr(t *testing.T, s string) netip.Addr {
 	return a
 }
 
-// flow builds a TCP flow key with the shared local address.
-func flow(t *testing.T, localPort uint16, remote string, remotePort uint16) capture.FlowKey {
+// flow builds a TCP flow key with the shared local address. t may be a *testing.T
+// or a *testing.B, so the same builder serves both tests and benchmarks.
+func flow(t testing.TB, localPort uint16, remote string, remotePort uint16) capture.FlowKey {
 	t.Helper()
 	return capture.FlowKey{
 		LocalAddr:  mustAddr(t, localAddr),
@@ -100,7 +103,6 @@ func TestJoinAttributesConnectionsToOwningProcess(t *testing.T) {
 	want := ConnectionRecord{
 		PID:           42,
 		ProcessName:   "curl",
-		LocalAddr:     localAddr,
 		LocalPort:     51000,
 		RemoteAddr:    "140.82.112.3",
 		RemotePort:    443,
@@ -122,11 +124,6 @@ func TestJoinAttributesConnectionsToOwningProcess(t *testing.T) {
 	}
 	if rows[0].Connections != 2 || rows[0].BytesInTotal != 4020 {
 		t.Errorf("row = %+v, want 2 connections and 4020 bytes in", rows[0])
-	}
-
-	// Latest must serve the same snapshot for a paused UI.
-	if len(a.Latest().Connections) != 2 {
-		t.Errorf("Latest() has %d records, want 2", len(a.Latest().Connections))
 	}
 }
 
@@ -295,6 +292,54 @@ func TestJoinMarksQuietConnectionsClosedThenEvictsThem(t *testing.T) {
 	}
 }
 
+// TestClosedIsExclusiveOfIdleThreshold pins down the boundary of the `>` in
+// Closed: exactly IdleThreshold quiet must still read as open, and one tick
+// past must flip.
+func TestClosedIsExclusiveOfIdleThreshold(t *testing.T) {
+	lastSeen := time.Now()
+	record := ConnectionRecord{LastSeen: lastSeen}
+	row := Row{LastSeen: lastSeen}
+
+	atThreshold := lastSeen.Add(IdleThreshold)
+	if record.Closed(atThreshold) {
+		t.Error("ConnectionRecord.Closed() at exactly IdleThreshold reports closed, want open (Closed uses >, not >=)")
+	}
+	if row.Closed(atThreshold) {
+		t.Error("Row.Closed() at exactly IdleThreshold reports closed, want open (Closed uses >, not >=)")
+	}
+
+	pastThreshold := lastSeen.Add(IdleThreshold + time.Nanosecond)
+	if !record.Closed(pastThreshold) {
+		t.Error("ConnectionRecord.Closed() just past IdleThreshold reports open, want closed")
+	}
+	if !row.Closed(pastThreshold) {
+		t.Error("Row.Closed() just past IdleThreshold reports open, want closed")
+	}
+}
+
+// TestJoinRetainsConnectionAtExactlyGracePeriod pins down the boundary of the
+// eviction check's strict Before: a connection exactly GracePeriod old must
+// survive one more refresh, and only age out the tick after.
+func TestJoinRetainsConnectionAtExactlyGracePeriod(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	key := flow(t, 51000, "140.82.112.3", 443)
+	flows := map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)}
+	ports := map[uint16]procinfo.Process{51000: {PID: 42, Name: "curl"}}
+	a.join(flows, ports, now)
+
+	atBoundary := a.join(flows, ports, now.Add(GracePeriod))
+	if len(atBoundary.Connections) != 1 {
+		t.Error("connection evicted at exactly GracePeriod, want retained (the eviction check is a strict Before)")
+	}
+
+	pastBoundary := a.join(flows, ports, now.Add(GracePeriod+time.Nanosecond))
+	if len(pastBoundary.Connections) != 0 {
+		t.Error("connection survived just past GracePeriod, want evicted")
+	}
+}
+
 func TestJoinForgetsFlowsTheCapturerHasDropped(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
@@ -393,7 +438,7 @@ func TestByDestinationGranularityChangesRowCount(t *testing.T) {
 
 func TestByDestinationBracketsIPv6(t *testing.T) {
 	now := time.Now()
-	snap := Snapshot{At: now, Connections: []ConnectionRecord{
+	snap := Snapshot{Connections: []ConnectionRecord{
 		{PID: 1, RemoteAddr: "2606:4700::1111", RemotePort: 443, LastSeen: now},
 	}}
 
@@ -476,11 +521,11 @@ func TestFilterByDestinationHonoursGrouping(t *testing.T) {
 	snap := twoProcessSnapshot(now)
 
 	// Grouped by IP the port is ignored, so both of the host's ports survive.
-	if got := FilterByDestination(snap, "140.82.112.3", 0, false); len(got.Connections) != 2 {
+	if got := FilterByDestination(snap, "140.82.112.3", 0, GroupByIP); len(got.Connections) != 2 {
 		t.Errorf("FilterByDestination without port kept %d connections, want 2", len(got.Connections))
 	}
 	// Grouped by IP:port only the matching port survives.
-	got := FilterByDestination(snap, "140.82.112.3", 443, true)
+	got := FilterByDestination(snap, "140.82.112.3", 443, GroupByIPPort)
 	if len(got.Connections) != 1 || got.Connections[0].RemotePort != 443 {
 		t.Errorf("FilterByDestination with port kept %+v, want only port 443", got.Connections)
 	}
@@ -496,7 +541,69 @@ func TestRefreshWiresBothSources(t *testing.T) {
 	if len(snap.Connections) != 0 {
 		t.Errorf("Refresh() on idle sources produced %d records, want 0", len(snap.Connections))
 	}
-	if !a.Latest().At.Equal(snap.At) {
-		t.Error("Latest() does not match the snapshot Refresh() just published")
+}
+
+// TestAggregatorRefreshIsSafeForConcurrentUse drives Refresh from many
+// goroutines against one Aggregator, to prove the mutex guarding records is
+// sufficient. Run with -race to catch anything it misses.
+func TestAggregatorRefreshIsSafeForConcurrentUse(t *testing.T) {
+	a := New(capture.New(capture.DefaultConfig()), procinfo.NewPoller())
+
+	const goroutines = 8
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				a.Refresh(time.Now())
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// benchmarkFlows builds n synthetic flows spread over 50 PIDs and 20 remote
+// hosts, plus the port map attributing them, for BenchmarkJoin and
+// BenchmarkRollup.
+func benchmarkFlows(b *testing.B, n int) (map[capture.FlowKey]capture.FlowStats, map[uint16]procinfo.Process) {
+	b.Helper()
+
+	now := time.Now()
+	flows := make(map[capture.FlowKey]capture.FlowStats, n)
+	ports := make(map[uint16]procinfo.Process, n)
+	for i := 0; i < n; i++ {
+		localPort := uint16(1024 + i)
+		remote := fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256)
+		key := flow(b, localPort, remote, uint16(1+i%1000))
+		flows[key] = stats(uint64(1000+i), uint64(500+i), now)
+		ports[localPort] = procinfo.Process{PID: int32(i % 50), Name: "proc"}
+	}
+	return flows, ports
+}
+
+// BenchmarkJoin exercises the aggregator's hot per-refresh-tick path.
+func BenchmarkJoin(b *testing.B) {
+	flows, ports := benchmarkFlows(b, 1000)
+	a := New(nil, nil)
+	now := time.Now()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a.join(flows, ports, now)
+	}
+}
+
+// BenchmarkRollup exercises ByProcess's rollup of a realistic-sized snapshot.
+func BenchmarkRollup(b *testing.B) {
+	flows, ports := benchmarkFlows(b, 1000)
+	a := New(nil, nil)
+	snap := a.join(flows, ports, time.Now())
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ByProcess(snap)
 	}
 }

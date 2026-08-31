@@ -325,6 +325,89 @@ func TestCacheIsBoundedAndKeepsWhatIsStillAskedAbout(t *testing.T) {
 	}
 }
 
+func TestWithLookupTimeoutOverridesTheDefault(t *testing.T) {
+	var calls atomic.Int64
+	r := NewResolverWith(func(ctx context.Context, _ string) ([]string, error) {
+		calls.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}, WithLookupTimeout(10*time.Millisecond))
+
+	if r.timeout != 10*time.Millisecond {
+		t.Fatalf("timeout = %v, want the overridden 10ms", r.timeout)
+	}
+
+	// The override has to actually reach the query, not just the field: a
+	// query that outlives it must still be cut off promptly rather than
+	// running out to the package default of two seconds.
+	start := time.Now()
+	r.Lookup(context.Background(), testIP)
+	waitFor(t, "the query to time out", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.inflight) == 0
+	})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("query timed out after %v, want it bounded by the overridden 10ms", elapsed)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("%d queries, want 1", got)
+	}
+}
+
+func TestWithMaxConcurrentOverridesTheDefault(t *testing.T) {
+	var live, peak atomic.Int64
+	release := make(chan struct{})
+	defer close(release)
+
+	const limit = 2
+	r := NewResolverWith(func(context.Context, string) ([]string, error) {
+		n := live.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		<-release
+		live.Add(-1)
+		return nil, errNoSuchHost
+	}, WithMaxConcurrent(limit))
+
+	waitFor(t, "the slots to fill", func() bool {
+		for i := range 20 {
+			r.Lookup(context.Background(), fmt.Sprintf("10.0.%d.%d", i/256, i%256))
+		}
+		return peak.Load() == limit
+	})
+
+	if got := peak.Load(); got > limit {
+		t.Errorf("%d queries ran at once, want at most the overridden %d", got, limit)
+	}
+}
+
+func TestWithMaxCacheEntriesOverridesTheDefault(t *testing.T) {
+	r := NewResolverWith(func(context.Context, string) ([]string, error) {
+		return nil, errNoSuchHost
+	}, WithMaxCacheEntries(2))
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.put("10.0.0.1", result{})
+	r.put("10.0.0.2", result{})
+	if len(r.cur) != 2 {
+		t.Fatalf("cur holds %d entries before the generation is full, want 2", len(r.cur))
+	}
+
+	// A third entry has to roll the generation over at the overridden size of
+	// two, not at the package default of 4096.
+	r.put("10.0.0.3", result{})
+	if len(r.cur) != 1 || len(r.prev) != 2 {
+		t.Errorf("after rollover cur=%d prev=%d, want cur=1 prev=2", len(r.cur), len(r.prev))
+	}
+}
+
 func TestFirstName(t *testing.T) {
 	tests := []struct {
 		name  string

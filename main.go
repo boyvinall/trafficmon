@@ -45,9 +45,9 @@ func main() {
 			},
 		},
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
-			var level slog.Level
-			if err := level.UnmarshalText([]byte(cmd.String("level"))); err != nil {
-				return ctx, fmt.Errorf("invalid log level %q: %w", cmd.String("level"), err)
+			level, err := parseLevel(cmd.String("level"))
+			if err != nil {
+				return ctx, err
 			}
 			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 			return ctx, nil
@@ -58,6 +58,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// parseLevel parses the --level flag into a slog.Level, so that the
+// parsing itself can be unit tested apart from the slog.SetDefault side
+// effect that has to stay in the Before closure.
+func parseLevel(s string) (slog.Level, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(s)); err != nil {
+		return 0, fmt.Errorf("invalid log level %q: %w", s, err)
+	}
+	return level, nil
 }
 
 func run(ctx context.Context, cmd *cli.Command) error {

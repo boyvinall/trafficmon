@@ -84,17 +84,26 @@ func ListPIDs() ([]int32, error) {
 	// A zero buffer asks the kernel how many bytes the full list needs.
 	n, err := C.proc_listpids(C.PROC_ALL_PIDS, 0, nil, 0)
 	if n <= 0 {
-		return nil, fmt.Errorf("proc_listpids (sizing): %w", err)
+		return nil, fmt.Errorf("proc_listpids (sizing): %w", cgoErr(err))
 	}
 
-	buf := make([]int32, n/C.int(unsafe.Sizeof(C.int(0))))
-	n, err = C.proc_listpids(C.PROC_ALL_PIDS, 0, unsafe.Pointer(&buf[0]), C.int(len(buf))*C.int(unsafe.Sizeof(C.int(0))))
+	// Ask for more than the sizing call reported: a process can start between
+	// the two calls, and a full buffer is indistinguishable from a truncated
+	// one. Mirrors the same margin in listFDs.
+	elemSize := C.int(unsafe.Sizeof(C.int(0)))
+	count := int(n)/int(elemSize) + 16
+
+	buf := make([]int32, count)
+	n, err = C.proc_listpids(C.PROC_ALL_PIDS, 0, unsafe.Pointer(&buf[0]), C.int(count)*elemSize)
 	if n <= 0 {
-		return nil, fmt.Errorf("proc_listpids: %w", err)
+		return nil, fmt.Errorf("proc_listpids: %w", cgoErr(err))
 	}
 
-	count := int(n) / int(unsafe.Sizeof(C.int(0)))
-	pids := buf[:count]
+	got := int(n) / int(elemSize)
+	if got > count {
+		got = count
+	}
+	pids := buf[:got]
 
 	// The kernel pads the tail with zeroes; drop them.
 	out := pids[:0]
@@ -111,7 +120,7 @@ func ProcessName(pid int32) (string, error) {
 	buf := make([]byte, C.PROC_PIDPATHINFO_MAXSIZE)
 	n, err := C.proc_name(C.int(pid), unsafe.Pointer(&buf[0]), C.uint32_t(len(buf)))
 	if n <= 0 {
-		return "", fmt.Errorf("proc_name(%d): %w", pid, err)
+		return "", fmt.Errorf("proc_name(%d): %w", pid, cgoErr(err))
 	}
 	return string(buf[:n]), nil
 }
@@ -171,7 +180,7 @@ func SocketsForPID(pid int32) ([]Socket, error) {
 			continue
 		}
 
-		proto := protoName(addrs)
+		proto := protoName(int(addrs.kind), int(addrs.protocol))
 		if proto == "" || addrs.lport == 0 {
 			continue
 		}
@@ -217,16 +226,29 @@ func listFDs(pid int32) ([]C.struct_proc_fdinfo, error) {
 	return buf[:got], nil
 }
 
+// Kind/protocol constants mirrored as plain Go ints so that protoName, and
+// tests exercising it directly, do not need their own "import C" (test files
+// cannot use cgo).
+const (
+	sockInfoTCP = int(C.SOCKINFO_TCP)
+	sockInfoIn  = int(C.SOCKINFO_IN)
+	ipprotoTCP  = int(C.IPPROTO_TCP)
+	ipprotoUDP  = int(C.IPPROTO_UDP)
+)
+
 // protoName maps a socket's kind and protocol number onto the names the rest of
-// the program uses, returning "" for socket types we do not track.
-func protoName(addrs C.mn_sock_addrs) string {
-	if addrs.kind == C.SOCKINFO_TCP {
+// the program uses, returning "" for socket types we do not track. It takes
+// the two fields rather than the whole mn_sock_addrs, as plain ints rather
+// than C types, so it can be exercised directly in tests without building a
+// full socket_fdinfo or importing "C" from a test file.
+func protoName(kind, protocol int) string {
+	if kind == sockInfoTCP {
 		return "tcp"
 	}
-	switch addrs.protocol {
-	case C.IPPROTO_TCP:
+	switch protocol {
+	case ipprotoTCP:
 		return "tcp"
-	case C.IPPROTO_UDP:
+	case ipprotoUDP:
 		return "udp"
 	default:
 		return ""

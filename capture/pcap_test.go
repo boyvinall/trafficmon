@@ -66,6 +66,18 @@ func TestCapturerRecordReusesCounterPerFlow(t *testing.T) {
 	}
 }
 
+func TestListInterfaces(t *testing.T) {
+	names, err := ListInterfaces()
+	if err != nil {
+		// libpcap enumeration needs elevated privileges on some hosts; nothing
+		// to assert against there.
+		t.Skipf("ListInterfaces() error = %v", err)
+	}
+	if names == nil {
+		t.Fatal("ListInterfaces() = nil slice, want a non-nil slice")
+	}
+}
+
 func TestDefaultInterfaceNamesARealDevice(t *testing.T) {
 	name, err := DefaultInterface()
 	if err != nil {

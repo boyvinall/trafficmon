@@ -107,6 +107,40 @@ func TestTableColumnsByMode(t *testing.T) {
 	}
 }
 
+func TestPIDAndConnColumnsTruncateFromTheLeft(t *testing.T) {
+	// PID and CONN have no formatter-enforced width bound the way rate/total
+	// do (humanRate/humanBytes are provably within their column). This proves
+	// that if either value ever overflows its column anyway, the low-order
+	// digits — the ones that actually distinguish it from a neighbouring
+	// value — are what survive, rather than being the ones dropped.
+	row := aggregate.Row{PID: 2147483647, Connections: 123456}
+	cols := tableColumns(ModeProcess, aggregate.GroupByIP, nil)
+
+	tests := []struct {
+		title string
+		want  string
+	}{
+		{title: "PID", want: "…83647"},
+		{title: "CONN", want: "…3456"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.title, func(t *testing.T) {
+			for _, c := range cols {
+				if c.title != tc.title {
+					continue
+				}
+				if !c.truncLeft {
+					t.Fatalf("column %q does not set truncLeft; an overflow would drop its low-order digits", tc.title)
+				}
+				if got := pad(c.cell(row), c.width, c.align, c.truncLeft); got != tc.want {
+					t.Errorf("%s column = %q, want %q", tc.title, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestFitColumnsNarrowPolicy(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -262,22 +296,28 @@ func TestTruncateLeft(t *testing.T) {
 
 func TestPad(t *testing.T) {
 	tests := []struct {
-		name  string
-		s     string
-		w     int
-		align alignment
-		want  string
+		name      string
+		s         string
+		w         int
+		align     alignment
+		truncLeft bool
+		want      string
 	}{
 		{name: "left", s: "sshd", w: 8, align: alignLeft, want: "sshd    "},
 		{name: "right", s: "sshd", w: 8, align: alignRight, want: "    sshd"},
 		{name: "exact", s: "sshd", w: 4, align: alignRight, want: "sshd"},
 		{name: "truncated", s: "sshd", w: 3, align: alignRight, want: "ss…"},
 		{name: "empty right", s: "", w: 3, align: alignRight, want: "   "},
+		{
+			// PID and CONN pass truncLeft so the low-order digits survive an
+			// overflow instead of the high-order ones.
+			name: "truncated from the left", s: "123456", w: 4, align: alignRight, truncLeft: true, want: "…456",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := pad(tc.s, tc.w, tc.align); got != tc.want {
+			if got := pad(tc.s, tc.w, tc.align, tc.truncLeft); got != tc.want {
 				t.Errorf("pad(%q, %d) = %q, want %q", tc.s, tc.w, got, tc.want)
 			}
 		})
@@ -456,6 +496,29 @@ func TestSortRowsByKey(t *testing.T) {
 				t.Errorf("sorted by %s = %v, want %v", tc.k, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSortRowsByKeyIsStableOnTies(t *testing.T) {
+	// sort.SliceStable is used deliberately so that rows tied on the active
+	// key keep the order they arrived in; processRows never ties on any key,
+	// so TestSortRowsByKey alone never exercises that. This does.
+	rows := []aggregate.Row{
+		{Key: "a", RateInBps: 100, Connections: 5},
+		{Key: "b", RateInBps: 100, Connections: 5},
+		{Key: "c", RateInBps: 200, Connections: 5},
+	}
+
+	sortRows(rows, SortRate)
+
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		got[i] = r.Key
+	}
+	// c sorts first on its higher rate; a and b tie and must come out in the
+	// order they went in rather than swapping.
+	if want := []string{"c", "a", "b"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("sorted by rate = %v, want %v", got, want)
 	}
 }
 

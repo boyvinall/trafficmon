@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/boyvinall/mac-nethogs/aggregate"
@@ -110,6 +111,60 @@ func TestStackHasScope(t *testing.T) {
 	}
 	if !s.HasScope("pid:980") {
 		t.Errorf("popping dropped more than the top frame")
+	}
+}
+
+func TestStackApplyComposesFiltersInPushOrder(t *testing.T) {
+	// Apply's doc says it runs every filter innermost (most-recently pushed)
+	// last, meaning each frame's filter has to see the output of the one
+	// pushed before it, not the original snapshot. These two filters are
+	// order-sensitive — the second only produces "second-saw-1" if it runs
+	// after the first has already added its connection — so this proves the
+	// composition order rather than just that both ran.
+	s := NewStack(ModeProcess)
+	s.Push(Frame{
+		Filter: func(snap aggregate.Snapshot) aggregate.Snapshot {
+			snap.Connections = append(snap.Connections, aggregate.ConnectionRecord{ProcessName: "first"})
+			return snap
+		},
+	})
+	s.Push(Frame{
+		Filter: func(snap aggregate.Snapshot) aggregate.Snapshot {
+			snap.Connections = append(snap.Connections, aggregate.ConnectionRecord{
+				ProcessName: fmt.Sprintf("second-saw-%d", len(snap.Connections)),
+			})
+			return snap
+		},
+	})
+
+	got := s.Apply(aggregate.Snapshot{})
+
+	want := []string{"first", "second-saw-1"}
+	if len(got.Connections) != len(want) {
+		t.Fatalf("Apply produced %d connections, want %d: %v", len(got.Connections), len(want), got.Connections)
+	}
+	for i, name := range want {
+		if got.Connections[i].ProcessName != name {
+			t.Errorf("connection %d = %q, want %q", i, got.Connections[i].ProcessName, name)
+		}
+	}
+}
+
+func TestStackSetModeNoopOnceDrilled(t *testing.T) {
+	s := NewStack(ModeProcess)
+
+	s.Push(Frame{Mode: ModeDestination})
+	if s.Depth() == 0 {
+		t.Fatalf("Push did not increase depth")
+	}
+
+	s.SetMode(ModeDestination)
+
+	// SetMode only ever touches the bottom frame, and only at depth 0; once
+	// something has been pushed on top of it, drilling back down and toggling
+	// mode again is Push's job, not SetMode's.
+	if got := s.frames[0].Mode; got != ModeProcess {
+		t.Errorf("SetMode changed the bottom frame at depth %d: got mode %d, want %d", s.Depth(), got, ModeProcess)
 	}
 }
 

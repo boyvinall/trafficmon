@@ -4,10 +4,16 @@ import "github.com/charmbracelet/lipgloss"
 
 // Styles holds every lipgloss style the UI uses, so themes live in one place.
 type Styles struct {
-	Header     lipgloss.Style
+	// Header marks out the title bar naming the app and the current view.
+	Header lipgloss.Style
+	// Breadcrumb renders the header's drill path and status segments, which
+	// are secondary to the title they hang off.
 	Breadcrumb lipgloss.Style
-	Footer     lipgloss.Style
-	Selected   lipgloss.Style
+	// Footer marks out the key-hint line (or the filter input in its place)
+	// from the table above it.
+	Footer lipgloss.Style
+	// Selected highlights the row under the cursor.
+	Selected lipgloss.Style
 	// Closed dims rows whose connections have all gone away but are still
 	// inside the grace period.
 	Closed lipgloss.Style
