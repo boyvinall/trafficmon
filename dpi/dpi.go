@@ -1,9 +1,10 @@
 // Package dpi looks inside a flow's packets for a hostname the remote
-// endpoint identified itself with — a TLS ClientHello's SNI extension today,
-// with more protocols (HTTP's Host header, QUIC's Initial SNI, …) expected to
-// follow. It is deliberately separate from capture: capture's read loop stays
-// a thin, allocation-free byte-accounting path, and every inspector plugs
-// into the one seam below without that loop needing protocol knowledge.
+// endpoint identified itself with — a TLS or QUIC ClientHello's SNI
+// extension — plus, via PassiveInspector, hostnames DNS answers reveal for
+// endpoints other than the flow they arrived on. It is deliberately separate
+// from capture: capture's read loop stays a thin, allocation-free
+// byte-accounting path, and every inspector plugs into one of the two seams
+// below without that loop needing protocol knowledge.
 package dpi
 
 // CandidatePacket is the cheap, already-decoded slice of one packet's
@@ -48,5 +49,36 @@ type Inspector interface {
 // DefaultInspectors returns the inspector set Capturer runs with unless a
 // Config overrides it.
 func DefaultInspectors() []Inspector {
-	return []Inspector{NewTLSSNIInspector()}
+	return []Inspector{NewTLSSNIInspector(), NewQUICSNIInspector()}
+}
+
+// HostnameFinding is one IP-to-hostname mapping a PassiveInspector observed —
+// unlike Inspector, the endpoint the hostname describes is not necessarily
+// the flow the packet arrived on.
+type HostnameFinding struct {
+	IP       string
+	Hostname string
+}
+
+// PassiveInspector examines packets for hostnames of other connections'
+// endpoints — a DNS answer being the obvious source — rather than the flow
+// it arrived on. Capturer feeds every finding straight into HostnameCache
+// instead of a single flow's own hostname.
+type PassiveInspector interface {
+	// Name identifies the inspector, for logs and future metrics.
+	Name() string
+
+	// Candidate reports, cheaply, whether a packet is worth the cost of
+	// Inspect. It must not itself touch the payload.
+	Candidate(p CandidatePacket) bool
+
+	// Inspect examines a flow's application-layer bytes and returns every
+	// IP-to-hostname mapping it found.
+	Inspect(payload []byte) []HostnameFinding
+}
+
+// DefaultPassiveInspectors returns the passive inspector set Capturer runs
+// with unless a Config overrides it.
+func DefaultPassiveInspectors() []PassiveInspector {
+	return []PassiveInspector{NewDNSAnswerInspector()}
 }

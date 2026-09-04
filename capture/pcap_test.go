@@ -35,6 +35,23 @@ func (f *fakeInspector) Inspect([]byte) (string, bool) {
 	return f.hostname, f.ok
 }
 
+// fakePassiveInspector is a dpi.PassiveInspector test double: it always
+// accepts candidates and returns a fixed set of findings, while counting how
+// many times Inspect was actually called.
+type fakePassiveInspector struct {
+	findings []dpi.HostnameFinding
+	calls    int
+}
+
+func (f *fakePassiveInspector) Name() string { return "fake-passive" }
+
+func (f *fakePassiveInspector) Candidate(dpi.CandidatePacket) bool { return true }
+
+func (f *fakePassiveInspector) Inspect([]byte) []dpi.HostnameFinding {
+	f.calls++
+	return f.findings
+}
+
 func TestCapturerRecordAndSnapshot(t *testing.T) {
 	c := New(DefaultConfig())
 	now := time.Now().Truncate(time.Second)
@@ -126,6 +143,151 @@ func TestCapturerInspectSetsHostnameAndCachesByIP(t *testing.T) {
 	if insp.calls != 1 {
 		t.Errorf("Inspect() called %d times, want 1", insp.calls)
 	}
+}
+
+// TestCapturerInspectHandlesUDPCandidateWithoutReassembly covers a
+// UDP-based Inspector (QUIC's Initial packet): one datagram is already a
+// complete unit, so it must be inspected directly, with no HelloAssembler
+// continuation state and no dependence on the TCP-specific reassembly path.
+func TestCapturerInspectHandlesUDPCandidateWithoutReassembly(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	key := FlowKey{
+		LocalAddr:  mustAddr(t, "192.168.1.10"),
+		LocalPort:  51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"),
+		RemotePort: 443,
+		Proto:      ProtoUDP,
+	}
+	ctr := c.record(key, now, 1200, false)
+
+	insp := &fakeInspector{hostname: "quic.example.com", ok: true}
+	c.cfg.Inspectors = []dpi.Inspector{insp}
+
+	data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolUDP),
+		&layers.UDP{SrcPort: 51000, DstPort: 443},
+		gopacket.Payload(bytes.Repeat([]byte{0xAB}, 1200)))
+	info := packetInfo{Proto: ProtoUDP, SrcPort: 51000, DstPort: 443, Bytes: uint64(len(data) - 14)}
+	c.inspect(data, info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if got := ctr.Hostname(); got != "quic.example.com" {
+		t.Fatalf("Hostname() = %q, want %q", got, "quic.example.com")
+	}
+	if got, ok := c.hostnameCache.Get(key.RemoteAddr.String(), now); !ok || got != "quic.example.com" {
+		t.Fatalf("HostnameCache Get() = %q, %v; want %q, true", got, ok, "quic.example.com")
+	}
+	if ctr.HelloInProgress() {
+		t.Error("HelloInProgress() = true after a UDP candidate; UDP must not use TLS reassembly")
+	}
+
+	// A second datagram on the same flow must not re-invoke the inspector:
+	// the flow was marked attempted after the first, complete datagram.
+	c.inspect(data, info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	if insp.calls != 1 {
+		t.Errorf("Inspect() called %d times, want 1", insp.calls)
+	}
+}
+
+// TestCapturerInspectPassiveFeedsHostnameCache proves a PassiveInspector
+// finding lands in HostnameCache directly, with no flow/ByteCounter
+// involvement at all — the IP it names need not be (and here isn't) the
+// flow's own remote address.
+func TestCapturerInspectPassiveFeedsHostnameCache(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	insp := &fakePassiveInspector{findings: []dpi.HostnameFinding{
+		{IP: "93.184.216.34", Hostname: "example.com"},
+	}}
+	c.cfg.PassiveInspectors = []dpi.PassiveInspector{insp}
+
+	data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolUDP),
+		&layers.UDP{SrcPort: 53, DstPort: 51000},
+		gopacket.Payload([]byte("dns response bytes")))
+	info := packetInfo{Proto: ProtoUDP, SrcPort: 53, DstPort: 51000, Bytes: uint64(len(data) - 14)}
+	c.inspectPassive(data, info, layers.LinkTypeEthernet, now)
+
+	if got, ok := c.hostnameCache.Get("93.184.216.34", now); !ok || got != "example.com" {
+		t.Fatalf("HostnameCache Get() = %q, %v; want %q, true", got, ok, "example.com")
+	}
+	if insp.calls != 1 {
+		t.Errorf("Inspect() called %d times, want 1", insp.calls)
+	}
+}
+
+// TestCapturerInspectPassiveSkipsInspectorsThatRejectTheCandidate proves
+// Candidate actually gates each PassiveInspector independently: one that
+// rejects the packet must never have Inspect called on it, while another
+// that accepts the same packet still runs normally.
+func TestCapturerInspectPassiveSkipsInspectorsThatRejectTheCandidate(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	accepting := &fakePassiveInspector{findings: []dpi.HostnameFinding{{IP: "10.0.0.1", Hostname: "h"}}}
+	c.cfg.PassiveInspectors = []dpi.PassiveInspector{&candidateRejectingPassiveInspector{}, accepting}
+
+	data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolUDP),
+		&layers.UDP{SrcPort: 12345, DstPort: 54321}, gopacket.Payload([]byte("x")))
+	info := packetInfo{Proto: ProtoUDP, SrcPort: 12345, DstPort: 54321, Bytes: uint64(len(data) - 14)}
+	c.inspectPassive(data, info, layers.LinkTypeEthernet, now) // must not panic
+
+	if accepting.calls != 1 {
+		t.Errorf("Inspect() called %d times on the accepting inspector, want 1", accepting.calls)
+	}
+}
+
+// candidateRejectingPassiveInspector never accepts a candidate; its Inspect
+// panics so the test above fails loudly if Candidate is ever bypassed.
+type candidateRejectingPassiveInspector struct{}
+
+func (candidateRejectingPassiveInspector) Name() string                       { return "reject" }
+func (candidateRejectingPassiveInspector) Candidate(dpi.CandidatePacket) bool { return false }
+func (candidateRejectingPassiveInspector) Inspect([]byte) []dpi.HostnameFinding {
+	panic("Inspect must not be called when Candidate is false")
+}
+
+// TestCapturerInspectPassiveStripsTCPLengthPrefix covers DNS-over-TCP: the
+// 2-byte message-length prefix must be stripped before PassiveInspectors
+// see the payload, so a real dpi.DNSAnswerInspector (which expects one bare
+// DNS message) still finds the answer.
+func TestCapturerInspectPassiveStripsTCPLengthPrefix(t *testing.T) {
+	c := New(DefaultConfig())
+	c.cfg.PassiveInspectors = dpi.DefaultPassiveInspectors()
+	now := time.Now()
+
+	msg := dnsResponse(t, "example.com", net.IPv4(93, 184, 216, 34))
+	prefixed := append([]byte{byte(len(msg) >> 8), byte(len(msg))}, msg...)
+
+	data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 53, DstPort: 51000, PSH: true, ACK: true},
+		gopacket.Payload(prefixed))
+	info := packetInfo{Proto: ProtoTCP, SrcPort: 53, DstPort: 51000, Bytes: uint64(len(data) - 14)}
+	c.inspectPassive(data, info, layers.LinkTypeEthernet, now)
+
+	if got, ok := c.hostnameCache.Get("93.184.216.34", now); !ok || got != "example.com" {
+		t.Fatalf("HostnameCache Get() = %q, %v; want %q, true", got, ok, "example.com")
+	}
+}
+
+// dnsResponse serializes a minimal DNS response naming ip for host, the same
+// way dpi's own tests build DNS wire bytes.
+func dnsResponse(t *testing.T, host string, ip net.IP) []byte {
+	t.Helper()
+
+	msg := &layers.DNS{QR: true}
+	msg.Questions = append(msg.Questions, layers.DNSQuestion{
+		Name: []byte(host), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+	})
+	msg.Answers = append(msg.Answers, layers.DNSResourceRecord{
+		Name: []byte(host), Type: layers.DNSTypeA, Class: layers.DNSClassIN, IP: ip,
+	})
+
+	buf := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(buf, gopacket.SerializeOptions{FixLengths: true}, msg); err != nil {
+		t.Fatalf("SerializeLayers: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // tlsClientHelloRecord hand-encodes a minimal TLS 1.2 ClientHello record

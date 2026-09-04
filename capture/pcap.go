@@ -52,13 +52,24 @@ type Config struct {
 	SnapLen int
 
 	// Inspectors are the DPI routines run against each flow's early packets
-	// to identify a hostname. Nil or empty disables DPI entirely.
+	// to identify that flow's own hostname. Nil or empty disables DPI
+	// entirely.
 	Inspectors []dpi.Inspector
+
+	// PassiveInspectors are the DPI routines run against every packet to
+	// learn hostnames for endpoints other than the one the packet arrived
+	// on — DNS answers being the obvious source — fed straight into
+	// HostnameCache. Nil or empty disables passive DPI entirely.
+	PassiveInspectors []dpi.PassiveInspector
 }
 
 // DefaultConfig returns the capture defaults.
 func DefaultConfig() Config {
-	return Config{SnapLen: 1600, Inspectors: dpi.DefaultInspectors()}
+	return Config{
+		SnapLen:           1600,
+		Inspectors:        dpi.DefaultInspectors(),
+		PassiveInspectors: dpi.DefaultPassiveInspectors(),
+	}
 }
 
 // Capturer owns the pcap handle and the flow table it feeds.
@@ -178,6 +189,7 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		}
 		ctr := c.record(key, ts, info.Bytes, inbound)
 		c.inspect(data, info, inbound, dec.linkType, key.RemoteAddr, ctr, ts)
+		c.inspectPassive(data, info, dec.linkType, ts)
 	}
 }
 
@@ -213,9 +225,14 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) *By
 // once that reassembly finishes or gives up, later packets on the same flow
 // are never re-parsed.
 //
+// A UDP candidate (QUIC's Initial packet) skips reassembly entirely: one
+// datagram is already a complete unit, so it is inspected directly and the
+// flow is marked attempted either way, hit or miss, with no continuation
+// state to track.
+//
 // data is the same zero-copy buffer the capture loop just read; it is used
 // here and only here, before the loop's next ZeroCopyReadPacketData call
-// invalidates it. extractTCPPayload builds its gopacket.Packet directly over
+// invalidates it. extractPayload builds its gopacket.Packet directly over
 // data with gopacket.NoCopy, so nothing here copies it — the one copy that
 // does happen is each segment's payload going into the flow's
 // dpi.HelloAssembler, which has to outlive the next read.
@@ -232,7 +249,7 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 		DatagramLen: int(info.Bytes),
 	}
 
-	inProgress := ctr.HelloInProgress()
+	inProgress := cand.IsTCP && ctr.HelloInProgress()
 	for _, insp := range c.cfg.Inspectors {
 		switch {
 		case inProgress:
@@ -243,9 +260,20 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 			continue
 		}
 
-		seq, payload, ok := extractTCPPayload(data, linkType)
+		seq, payload, ok := extractPayload(data, linkType, cand.IsTCP)
 		if !ok {
 			ctr.MarkHostnameAttempted()
+			return
+		}
+
+		if !cand.IsTCP {
+			// A single datagram, already complete: no reassembly, no
+			// continuation across further calls.
+			ctr.MarkHostnameAttempted()
+			if host, ok := insp.Inspect(payload); ok {
+				ctr.SetHostname(host)
+				c.hostnameCache.Put(remote.String(), host, ts)
+			}
 			return
 		}
 
@@ -265,19 +293,69 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 	}
 }
 
-// extractTCPPayload decodes data with the stock gopacket TCP decoder — not
+// inspectPassive runs the configured PassiveInspectors against every
+// packet, independent of any flow's own hostname state — a DNS resolver
+// flow keeps carrying new, unrelated query/response pairs for its whole
+// life, unlike a single ClientHello. Candidate keeps this cheap for every
+// packet that isn't DNS.
+func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.LinkType, ts time.Time) {
+	if len(c.cfg.PassiveInspectors) == 0 {
+		return
+	}
+
+	cand := dpi.CandidatePacket{
+		IsTCP:       info.Proto == ProtoTCP,
+		SrcPort:     info.SrcPort,
+		DstPort:     info.DstPort,
+		DatagramLen: int(info.Bytes),
+	}
+
+	for _, insp := range c.cfg.PassiveInspectors {
+		if !insp.Candidate(cand) {
+			continue
+		}
+
+		_, payload, ok := extractPayload(data, linkType, cand.IsTCP)
+		if !ok {
+			continue
+		}
+		if cand.IsTCP {
+			// DNS-over-TCP prefixes each message with its own 2-byte length;
+			// strip it so Inspect always sees one bare message, the same as
+			// the UDP case.
+			if len(payload) < 2 {
+				continue
+			}
+			payload = payload[2:]
+		}
+
+		for _, f := range insp.Inspect(payload) {
+			c.hostnameCache.Put(f.IP, f.Hostname, ts)
+		}
+	}
+}
+
+// extractPayload decodes data with the stock gopacket TCP/UDP decoder — not
 // the fast transportPorts path flowDecoder uses for every packet, see
-// decode.go — to recover the sequence number and payload bytes hello
-// reassembly needs. It is only called for packets that already passed
-// Candidate or belong to a flow already mid reassembly, so this second
-// decode's cost stays bounded to a handful of packets per new TLS connection.
-func extractTCPPayload(data []byte, linkType layers.LinkType) (seq uint32, payload []byte, ok bool) {
+// decode.go — to recover the application-layer payload (and, for TCP, the
+// sequence number hello reassembly needs). It is only called for packets
+// that already passed Candidate or belong to a flow already mid reassembly,
+// so this second decode's cost stays bounded to a handful of packets per new
+// connection.
+func extractPayload(data []byte, linkType layers.LinkType, isTCP bool) (seq uint32, payload []byte, ok bool) {
 	packet := gopacket.NewPacket(data, linkType, gopacket.NoCopy)
-	tcp, isTCP := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
-	if !isTCP {
+	if isTCP {
+		tcp, isTCP := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
+		if !isTCP {
+			return 0, nil, false
+		}
+		return tcp.Seq, tcp.LayerPayload(), true
+	}
+	udp, isUDP := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
+	if !isUDP {
 		return 0, nil, false
 	}
-	return tcp.Seq, tcp.LayerPayload(), true
+	return 0, udp.LayerPayload(), true
 }
 
 // Evict drops every flow last seen before the cutoff and reports how many it
