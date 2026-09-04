@@ -581,7 +581,7 @@ func (m Model) viewHeader() string {
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
-	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname), m.viewWidth())
+	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname, m.now), m.viewWidth())
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {

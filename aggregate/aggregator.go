@@ -84,6 +84,12 @@ type ConnectionRecord struct {
 	// time if it never has.
 	LastSeen time.Time
 
+	// FirstSeen is when the aggregator first observed this connection,
+	// across every join since it started running — not something procinfo
+	// itself reports, since a poll is stateless and only ever describes the
+	// instant it ran.
+	FirstSeen time.Time
+
 	// Hostname is the hostname DPI identified for this connection's remote
 	// endpoint, or "" if none has been found.
 	Hostname string
@@ -198,6 +204,9 @@ type Row struct {
 
 	Connections int
 	LastSeen    time.Time
+	// FirstSeen is the earliest FirstSeen among the connections rolled into
+	// this row.
+	FirstSeen time.Time
 	// Vanished mirrors ConnectionRecord.Vanished. rollup leaves it at its
 	// zero value for a grouped row: a summary of many connections in mixed
 	// presence has no single answer, so grouped rows are never dimmed.
@@ -311,6 +320,11 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 		}
 		seen[key] = true
 
+		firstSeen := now
+		if prev, ok := a.records[key]; ok {
+			firstSeen = prev.FirstSeen
+		}
+
 		rec := ConnectionRecord{
 			PID:         c.PID,
 			ProcessName: c.ProcessName,
@@ -321,6 +335,7 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			Proto:       c.Proto,
 			State:       c.State,
 			LastPolled:  now,
+			FirstSeen:   firstSeen,
 		}
 
 		flowKey := capture.FlowKey{
@@ -358,6 +373,12 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			proto:      fk.Proto.String(),
 		}
 		seen[key] = true
+
+		firstSeen := now
+		if prev, ok := a.records[key]; ok {
+			firstSeen = prev.FirstSeen
+		}
+
 		records[key] = ConnectionRecord{
 			ProcessName:   unattributedProcessLabel,
 			LocalAddr:     key.localAddr,
@@ -372,6 +393,7 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			RateOutBps:    st.RateOutBps,
 			LastSeen:      st.LastSeen,
 			Hostname:      st.Hostname,
+			FirstSeen:     firstSeen,
 		}
 	}
 
@@ -443,6 +465,9 @@ func rollup(records []ConnectionRecord, key func(ConnectionRecord) string, seed 
 		r.Connections++
 		if c.LastSeen.After(r.LastSeen) {
 			r.LastSeen = c.LastSeen
+		}
+		if r.FirstSeen.IsZero() || c.FirstSeen.Before(r.FirstSeen) {
+			r.FirstSeen = c.FirstSeen
 		}
 	}
 

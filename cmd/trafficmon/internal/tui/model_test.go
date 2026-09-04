@@ -172,10 +172,10 @@ func TestClosedRowsRenderDimmed(t *testing.T) {
 	withANSI(t)
 
 	// processRows is grouped-by-PID-shaped data (PID and Connections, no
-	// local/remote address). GroupByPID now also carries REMOTE and HOSTNAME,
-	// so the terminal has to be wide enough to leave PROCESS the room for
-	// the full label to survive untruncated.
-	m := newTestModel(processRows(), 150, 12)
+	// local/remote address). GroupByPID now also carries REMOTE, HOSTNAME and
+	// AGE, so the terminal has to be wide enough to leave PROCESS the room
+	// for the full label to survive untruncated.
+	m := newTestModel(processRows(), 159, 12)
 	m.grouping = aggregate.GroupByPID
 
 	// Keep the cursor off both rows under test: the selected style would

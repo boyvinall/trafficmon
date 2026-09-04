@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -19,7 +20,7 @@ func columnTitles(cols []column) []string {
 }
 
 func TestRenderRowsAlign(t *testing.T) {
-	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), 100)
 	want := tableWidth(cols)
 
 	// The header is checked under every sort key, because the marker the
@@ -40,7 +41,7 @@ func TestRenderRowsAlign(t *testing.T) {
 }
 
 func TestRenderRowsColumnOffsetsAreStable(t *testing.T) {
-	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), 100)
 	lines := renderRows(processRows(), cols)
 
 	// The right-hand edge of each column is a fixed offset. Checking that the
@@ -64,7 +65,7 @@ func TestRenderRowsColumnOffsetsAreStable(t *testing.T) {
 }
 
 func TestRenderRowShowsRateAndTotalTogether(t *testing.T) {
-	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), 100)
 	line := renderRow(processRows()[0], cols)
 
 	// The plan is explicit that rate and cumulative total are not a toggle, so
@@ -85,33 +86,33 @@ func TestTableColumnsByGrouping(t *testing.T) {
 	}{
 		{
 			name: "ungrouped, no hostname", grouping: aggregate.GroupNone,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "ungrouped, with hostname", grouping: aggregate.GroupNone, hostname: stubHostname,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by PID", grouping: aggregate.GroupByPID,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by PID, with hostname", grouping: aggregate.GroupByPID, hostname: stubHostname,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by process name", grouping: aggregate.GroupByProcessName,
-			want: []string{"PROCESS", "REMOTE", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "REMOTE", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by process name, with hostname", grouping: aggregate.GroupByProcessName, hostname: stubHostname,
-			want: []string{"PROCESS", "REMOTE", "HOSTNAME", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "REMOTE", "HOSTNAME", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := columnTitles(tableColumns(tc.grouping, tc.hostname))
+			got := columnTitles(tableColumns(tc.grouping, tc.hostname, testNow))
 			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)
 			}
@@ -174,7 +175,7 @@ func TestPIDAndConnColumnsTruncateFromTheLeft(t *testing.T) {
 	// value — are what survive, rather than being the ones dropped. GroupByPID
 	// is the one grouping where both columns are on screen together.
 	row := aggregate.Row{PID: 2147483647, Connections: 123456}
-	cols := tableColumns(aggregate.GroupByPID, nil)
+	cols := tableColumns(aggregate.GroupByPID, nil, testNow)
 
 	tests := []struct {
 		title string
@@ -210,28 +211,29 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 	}{
 		{
 			name: "roomy", width: 120,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 19,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 16,
 		},
 		{
-			name: "typical", width: 97,
+			name: "age dropped first", width: 105,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 10,
+			labelWidth: 14,
 		},
 		{
-			name: "connections dropped first", width: 90,
+			name: "connections dropped second", width: 96,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 10,
+			labelWidth: 12,
 		},
 		{
 			// Rate and total are never traded away, so below the essential
-			// set the table stops shrinking and the caller clips it. REMOTE
-			// is essential in every grouping now, so PID drops straight to
-			// that floor rather than there being a width where it alone is
-			// gone but the row still fits its own width.
-			name: "pid dropped, at the essential floor", width: 82,
+			// set the table stops shrinking and the caller clips it. With AGE
+			// gone too, dropping PID still leaves three flexible columns to
+			// share what PID's own width frees up, so there is a width where
+			// PID alone is gone and the row still fits its own width, before
+			// the essential floor is reached.
+			name: "pid dropped third", width: 89,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: minLabelWidth,
+			labelWidth: 13,
 		},
 		{
 			name: "essential floor", width: 30,
@@ -248,7 +250,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), tc.width)
+			cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), tc.width)
 
 			if got := columnTitles(cols); strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)
@@ -267,7 +269,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 }
 
 func TestFitColumnsDoesNotMutateInput(t *testing.T) {
-	cols := tableColumns(aggregate.GroupByPID, nil)
+	cols := tableColumns(aggregate.GroupByPID, nil, testNow)
 	before := len(cols)
 
 	fitColumns(cols, 40)
@@ -278,7 +280,7 @@ func TestFitColumnsDoesNotMutateInput(t *testing.T) {
 }
 
 func TestLabelTruncatesAtNarrowWidth(t *testing.T) {
-	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 82)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), 82)
 	line := renderRow(processRows()[0], cols)
 
 	label := string([]rune(line)[:cols[labelColumn].width])
@@ -453,6 +455,40 @@ func TestHumanRate(t *testing.T) {
 	}
 }
 
+func TestHumanDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{name: "negative clamps to zero", d: -time.Second, want: "0s"},
+		{name: "zero", d: 0, want: "0s"},
+		{name: "seconds", d: 45 * time.Second, want: "45s"},
+		{name: "just under a minute", d: 59 * time.Second, want: "59s"},
+		{name: "exactly a minute", d: time.Minute, want: "1m"},
+		{name: "minutes", d: 12 * time.Minute, want: "12m"},
+		{name: "just under an hour", d: 59 * time.Minute, want: "59m"},
+		{name: "exactly an hour", d: time.Hour, want: "1h00m"},
+		{name: "hours and minutes", d: 3*time.Hour + 45*time.Minute, want: "3h45m"},
+		{name: "just under a day", d: 23*time.Hour + 59*time.Minute, want: "23h59m"},
+		{name: "exactly a day", d: 24 * time.Hour, want: "1d00h"},
+		{name: "days and hours", d: 12*24*time.Hour + 5*time.Hour, want: "12d05h"},
+		{name: "widest output fits ageWidth", d: 999*24*time.Hour + 23*time.Hour, want: "999d23h"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := humanDuration(tc.d)
+			if got != tc.want {
+				t.Errorf("humanDuration(%v) = %q, want %q", tc.d, got, tc.want)
+			}
+			if lipgloss.Width(got) > ageWidth {
+				t.Errorf("humanDuration(%v) = %q, wider than the %d-cell age column", tc.d, got, ageWidth)
+			}
+		})
+	}
+}
+
 func TestTableHeaderMarksTheSortedColumns(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -466,7 +502,7 @@ func TestTableHeaderMarksTheSortedColumns(t *testing.T) {
 		{name: "connections", k: SortConnections, marked: []string{"CONN"}},
 	}
 
-	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), 100)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -594,46 +630,53 @@ func TestFitColumnsDropsHostnameThenStateThenPID(t *testing.T) {
 		labelWidth int
 	}{
 		{
-			// The four flexible columns split what the fixed ones leave, so
+			// The five flexible columns split what the fixed ones leave, so
 			// a wide terminal spends its extra cells on all of them.
 			name: "roomy", width: 200,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 32,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 29,
 		},
 		{
 			name: "typical", width: 140,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 17,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 14,
 		},
 		{
 			// The hostname goes before everything else, because it is the
 			// only column that annotates another one rather than carrying
 			// anything of its own: the address it names is still on screen
 			// without it.
-			name: "hostname dropped first", width: 110,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 11,
+			name: "hostname dropped first", width: 129,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 15,
 		},
 		{
-			name: "state dropped second", width: 100,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 12,
+			name: "state dropped second", width: 117,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 14,
 		},
 		{
-			name: "proto dropped third", width: 92,
+			name: "proto dropped third", width: 104,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 13,
+		},
+		{
+			// AGE drops ahead of PID: unlike PID, it names nothing about the
+			// row's identity, so it is purely supplementary information.
+			name: "age dropped fourth", width: 98,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 12,
+			labelWidth: 14,
 		},
 		{
-			name: "pid dropped fourth", width: 86,
+			name: "pid dropped fifth", width: 89,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 12,
+			labelWidth: 13,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cols := fitColumns(tableColumns(aggregate.GroupNone, stubHostname), tc.width)
+			cols := fitColumns(tableColumns(aggregate.GroupNone, stubHostname, testNow), tc.width)
 
 			if got := columnTitles(cols); strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)

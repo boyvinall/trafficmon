@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -123,12 +124,16 @@ const (
 //
 // The hostname goes first of all, because it is the only column that annotates
 // another one rather than carrying anything of its own: the address it names
-// is still on screen without it. STATE goes next, then PROTO, then CONN,
-// then PID.
+// is still on screen without it. STATE goes next, then PROTO, then AGE, then
+// CONN, then PID. AGE drops ahead of CONN and PID because it is purely
+// supplementary — unlike CONN and PID it names nothing about the row's
+// identity — but it is kept longer than HOSTNAME/STATE/PROTO since it applies
+// to every grouping alike.
 const (
 	prioHostname = iota
 	prioState
 	prioProto
+	prioAge
 	prioConnections
 	prioPID
 	prioEssential
@@ -148,6 +153,8 @@ const (
 	stateWidth = 11
 	// protoWidth fits "ICMP", the longest label protoLabel returns.
 	protoWidth = 4
+	// ageWidth fits "999d23h", the longest string humanDuration returns.
+	ageWidth = 7
 
 	// dnsPort is the well-known port DNS runs over. It is not a wire
 	// protocol of its own — procinfo and capture both only ever know this
@@ -218,7 +225,9 @@ type column struct {
 // address; it returns the bare address until one is known. Every grouping
 // rolls up per remote endpoint, so a row always has one to name; hostname is
 // nil only in tests that don't care about the HOSTNAME column.
-func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string) []column {
+//
+// now is the frame's clock, passed through to ageColumn.
+func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now time.Time) []column {
 	cols := []column{{
 		title: "PROCESS",
 		align: alignLeft,
@@ -284,6 +293,8 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string) []c
 			},
 		)
 	}
+
+	cols = append(cols, ageColumn(now))
 
 	return append(cols,
 		column{
@@ -404,6 +415,30 @@ func connColumn() column {
 		sortable:  true,
 		sortKey:   SortConnections,
 		truncLeft: true,
+	}
+}
+
+// ageColumn builds the AGE column, shared by every grouping: how long ago the
+// row's connection (or, grouped, the oldest of its rolled-up connections) was
+// first observed. now is the frame's clock, threaded through rather than read
+// live, for the same reason Model keeps its own now instead of calling
+// time.Now() in View.
+//
+// A zero FirstSeen means the row's connections came from fixtures or tests
+// that never went through Aggregator.join, rather than a real one seen for
+// no time at all, so it renders as "-" rather than a huge, meaningless age.
+func ageColumn(now time.Time) column {
+	return column{
+		title: "AGE",
+		width: ageWidth,
+		align: alignRight,
+		prio:  prioAge,
+		cell: func(r aggregate.Row) string {
+			if r.FirstSeen.IsZero() {
+				return "-"
+			}
+			return humanDuration(now.Sub(r.FirstSeen))
+		},
 	}
 }
 
@@ -652,4 +687,27 @@ func humanRate(bps float64) string {
 		bps = 0
 	}
 	return humanBytes(uint64(bps)) + "/s"
+}
+
+// humanDuration formats a connection's age for display, netstat-style: plain
+// seconds under a minute ("45s"), plain minutes under an hour ("12m"),
+// hours+minutes under a day ("3h45m"), and days+hours beyond that
+// ("12d05h"). Widest output is "999d23h" (7 cells) — sized for a realistic
+// connection lifetime, the same way humanBytes/humanRate size their columns
+// for a realistic byte count/rate rather than the full range a uint64 or
+// float64 could hold.
+func humanDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d/time.Hour), int(d/time.Minute)%60)
+	default:
+		return fmt.Sprintf("%dd%02dh", int(d/(24*time.Hour)), int(d/time.Hour)%24)
+	}
 }
