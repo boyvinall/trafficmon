@@ -277,6 +277,32 @@ func TestLookupGivesUpOnAQueryThatNeverAnswers(t *testing.T) {
 	}
 }
 
+// TestResolveReleasesSemaphoreSlotEvenWhenLookupIgnoresContext guards the fix
+// for a real platform risk: not every resolver actually honors a context
+// deadline for a reverse (PTR) query. lookup here never returns at all, so if
+// resolve waited on it directly (rather than racing it against queryCtx.Done)
+// this test would time out itself, wedged on the same semaphore slot every
+// other Lookup needs.
+func TestResolveReleasesSemaphoreSlotEvenWhenLookupIgnoresContext(t *testing.T) {
+	r := NewResolverWith(func(context.Context, string) ([]string, error) {
+		select {} // never returns, and never even looks at ctx
+	})
+	r.timeout = 10 * time.Millisecond
+
+	r.Lookup(context.Background(), testIP)
+
+	waitFor(t, "the semaphore slot to free up despite the stuck lookup", func() bool {
+		return len(r.sem) == 0
+	})
+
+	// A freed slot should mean a fresh address can be looked up too, not just
+	// that the accounting cleared.
+	r.Lookup(context.Background(), "203.0.113.9")
+	waitFor(t, "a second address to get its own slot", func() bool {
+		return len(r.sem) > 0
+	})
+}
+
 func TestLookupIgnoresTheEmptyAddress(t *testing.T) {
 	var calls atomic.Int64
 	r := NewResolverWith(resolvesTo("lb.github.com", &calls))

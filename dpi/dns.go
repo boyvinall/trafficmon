@@ -32,13 +32,7 @@ func (d *DNSAnswerInspector) Candidate(p CandidatePacket) bool {
 // across TCP segments goes undetected — the same accepted limitation
 // HelloAssembler documents for TLS.
 func (d *DNSAnswerInspector) Inspect(payload []byte) (findings []HostnameFinding) {
-	// layers.DNS parses attacker-controlled bytes; a malformed or truncated
-	// message must not be allowed to take the capture loop down with it.
-	defer func() {
-		if recover() != nil {
-			findings = nil
-		}
-	}()
+	defer recoverPanic()
 
 	var msg layers.DNS
 	if err := msg.DecodeFromBytes(payload, gopacket.NilDecodeFeedback); err != nil || !msg.QR {

@@ -781,7 +781,7 @@ func TestHostnamePrefersRowSNIOverDNS(t *testing.T) {
 	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
 
 	row := aggregate.Row{RemoteAddr: "140.82.112.3", Hostname: "own.example.com"}
-	if got := m.hostname(row); got != "own.example.com" {
+	if got := m.resolveHostname(row); got != "own.example.com" {
 		t.Errorf("hostname() = %q, want the row's own SNI %q, not the resolved DNS name", got, "own.example.com")
 	}
 }
@@ -797,10 +797,10 @@ func TestHostnameFallsBackToPerIPCacheWhenRowHasNoSNI(t *testing.T) {
 	// The same IP genuinely serving two different hostnames: the connection
 	// with its own SNI must keep showing it, unaffected by the cache: only
 	// the connection with none of its own borrows the fallback.
-	if got := m.hostname(withSNI); got != "own.example.com" {
+	if got := m.resolveHostname(withSNI); got != "own.example.com" {
 		t.Errorf("hostname() = %q, want the row's own SNI %q unaffected by the cache", got, "own.example.com")
 	}
-	if got := m.hostname(withoutSNI); got != "seeded-by-another-connection.example.com" {
+	if got := m.resolveHostname(withoutSNI); got != "seeded-by-another-connection.example.com" {
 		t.Errorf("hostname() = %q, want the per-IP cache fallback %q", got, "seeded-by-another-connection.example.com")
 	}
 }
@@ -810,7 +810,7 @@ func TestHostnameFallsBackToDNSWhenNoSNIOrCacheEntry(t *testing.T) {
 	m.hostnameCache = dpi.NewHostnameCache(dpi.DefaultHostnameCacheCapacity, dpi.DefaultHostnameCacheTTL)
 
 	row := aggregate.Row{RemoteAddr: "140.82.112.3"}
-	if got := m.hostname(row); got != "lb.github.com" {
+	if got := m.resolveHostname(row); got != "lb.github.com" {
 		t.Errorf("hostname() = %q, want the resolved DNS name %q", got, "lb.github.com")
 	}
 }
@@ -819,7 +819,7 @@ func TestHostnameFallsBackToBareAddressWhenNothingResolves(t *testing.T) {
 	m := newTestModel(nil, 200, 12)
 
 	row := aggregate.Row{RemoteAddr: "9.9.9.9"}
-	if got := m.hostname(row); got != "9.9.9.9" {
+	if got := m.resolveHostname(row); got != "9.9.9.9" {
 		t.Errorf("hostname() = %q, want the bare address %q", got, "9.9.9.9")
 	}
 }

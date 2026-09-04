@@ -158,7 +158,7 @@ func newResolvedModel(t *testing.T, names map[string]string, width, height int) 
 
 	waitFor(t, "every destination to resolve", func() bool {
 		for _, r := range m.rows {
-			if want, ok := names[r.RemoteAddr]; ok && m.hostname(r) != want {
+			if want, ok := names[r.RemoteAddr]; ok && m.resolveHostname(r) != want {
 				return false
 			}
 		}
@@ -174,12 +174,24 @@ func newResolvedModel(t *testing.T, names map[string]string, width, height int) 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
+	if cond() {
+		return
+	}
+
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if cond() {
+				return
+			}
+		case <-timeout.C:
 			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(time.Millisecond)
 	}
 }
 

@@ -154,8 +154,13 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"unsafe"
 )
+
+// procNameBufSize bounds the buffer ProcessName's proc_name fallback reads
+// into. macOS caps p_comm at 16 bytes; this leaves generous margin.
+const procNameBufSize = 64
 
 // ListPIDs returns every PID visible to the caller. Without root this is
 // limited to the current user's processes.
@@ -209,7 +214,11 @@ func ProcessName(pid int32) (string, error) {
 		return filepath.Base(name), nil
 	}
 
-	buf := make([]byte, C.PROC_PIDPATHINFO_MAXSIZE)
+	// proc_name reports the kernel's own p_comm, which macOS caps at 16
+	// bytes; procNameBufSize leaves generous margin over that without
+	// reaching for PROC_PIDPATHINFO_MAXSIZE, a much larger constant sized for
+	// a full filesystem path rather than a short process name.
+	buf := make([]byte, procNameBufSize)
 	n, err := C.proc_name(C.int(pid), unsafe.Pointer(&buf[0]), C.uint32_t(len(buf)))
 	if n <= 0 {
 		return "", fmt.Errorf("proc_name(%d): %w", pid, cgoErr(err))
@@ -217,9 +226,23 @@ func ProcessName(pid int32) (string, error) {
 	return string(buf[:n]), nil
 }
 
+// argv0BufPool holds the C.ARG_MAX (256KiB) scratch buffers argv0 reads
+// into. ProcessName runs once per newly-seen PID, and a burst of them at
+// once — process start, or a spike of new connections — would otherwise
+// allocate megabytes of transient scratch space per poll.
+var argv0BufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, C.ARG_MAX)
+		return &buf
+	},
+}
+
 // argv0 returns pid's argv[0], or ok == false if it could not be read.
 func argv0(pid int32) (name string, ok bool) {
-	buf := make([]byte, C.ARG_MAX)
+	bufp := argv0BufPool.Get().(*[]byte)
+	defer argv0BufPool.Put(bufp)
+	buf := *bufp
+
 	n := C.mn_proc_argv0(C.pid_t(pid), (*C.char)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
 	if n <= 0 {
 		return "", false

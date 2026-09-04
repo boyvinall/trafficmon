@@ -291,9 +291,12 @@ func TestByteCounterHelloInProgress(t *testing.T) {
 	// progress" having been touched at all — callers only consult this
 	// before NeedsHostnameInspection has gone false, so it does not matter
 	// that reassembly finished on the first call.
-	c.AddHelloSegment(1000, []byte{0x16, 0x03, 0x01, 0x00, 0x01, 0x00})
+	c.AddHelloSegment("tls-sni", 1000, []byte{0x16, 0x03, 0x01, 0x00, 0x01, 0x00})
 	if !c.HelloInProgress() {
 		t.Error("HelloInProgress() = false after AddHelloSegment")
+	}
+	if got := c.HelloInspector(); got != "tls-sni" {
+		t.Errorf("HelloInspector() = %q, want %q", got, "tls-sni")
 	}
 }
 
@@ -301,14 +304,26 @@ func TestByteCounterAddHelloSegmentJoinsAcrossCalls(t *testing.T) {
 	c := &ByteCounter{}
 
 	first := []byte{0x16, 0x03, 0x01, 0x00, 0x02}
-	if ready, done := c.AddHelloSegment(1000, first); ready != nil || done {
+	if ready, done := c.AddHelloSegment("tls-sni", 1000, first); ready != nil || done {
 		t.Fatalf("AddHelloSegment(first) = ready %v, done=%v; want nil, false", ready, done)
 	}
 
 	second := []byte{0xAA, 0xBB}
-	ready, done := c.AddHelloSegment(1000+uint32(len(first)), second)
+	ready, done := c.AddHelloSegment("tls-sni", 1000+uint32(len(first)), second)
 	want := append(append([]byte{}, first...), second...)
 	if !done || string(ready) != string(want) {
 		t.Fatalf("AddHelloSegment(second) = ready %v, done=%v; want %v, true", ready, done, want)
+	}
+}
+
+func TestByteCounterAddHelloSegmentKeepsFirstInspector(t *testing.T) {
+	c := &ByteCounter{}
+
+	c.AddHelloSegment("tls-sni", 1000, []byte{0x16})
+	// A later call naming a different inspector must not steal or reset the
+	// reassembly already under way for the first one.
+	c.AddHelloSegment("quic-sni", 1001, []byte{0x17})
+	if got := c.HelloInspector(); got != "tls-sni" {
+		t.Errorf("HelloInspector() = %q, want %q (the inspector that started reassembly)", got, "tls-sni")
 	}
 }

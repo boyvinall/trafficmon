@@ -316,27 +316,30 @@ func TestProtoName(t *testing.T) {
 // bare kernel constant nobody would recognise.
 func TestTCPStateName(t *testing.T) {
 	tests := []struct {
+		name  string
 		state int
 		want  string
 	}{
-		{tsiClosed, "CLOSED"},
-		{tsiListen, "LISTEN"},
-		{tsiSynSent, "SYN_SENT"},
-		{tsiSynReceived, "SYN_RCVD"},
-		{tsiEstablished, "ESTABLISHED"},
-		{tsiCloseWait, "CLOSE_WAIT"},
-		{tsiFinWait1, "FIN_WAIT_1"},
-		{tsiClosing, "CLOSING"},
-		{tsiLastAck, "LAST_ACK"},
-		{tsiFinWait2, "FIN_WAIT_2"},
-		{tsiTimeWait, "TIME_WAIT"},
-		{-1, ""},
-		{99, ""},
+		{"closed", tsiClosed, "CLOSED"},
+		{"listen", tsiListen, "LISTEN"},
+		{"syn sent", tsiSynSent, "SYN_SENT"},
+		{"syn received", tsiSynReceived, "SYN_RCVD"},
+		{"established", tsiEstablished, "ESTABLISHED"},
+		{"close wait", tsiCloseWait, "CLOSE_WAIT"},
+		{"fin wait 1", tsiFinWait1, "FIN_WAIT_1"},
+		{"closing", tsiClosing, "CLOSING"},
+		{"last ack", tsiLastAck, "LAST_ACK"},
+		{"fin wait 2", tsiFinWait2, "FIN_WAIT_2"},
+		{"time wait", tsiTimeWait, "TIME_WAIT"},
+		{"no-state sentinel", -1, ""},
+		{"unrecognised value", 99, ""},
 	}
 	for _, tc := range tests {
-		if got := tcpStateName(tc.state); got != tc.want {
-			t.Errorf("tcpStateName(%d) = %q, want %q", tc.state, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tcpStateName(tc.state); got != tc.want {
+				t.Errorf("tcpStateName(%d) = %q, want %q", tc.state, got, tc.want)
+			}
+		})
 	}
 }
 

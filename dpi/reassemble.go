@@ -30,11 +30,11 @@ type HelloAssembler struct {
 // NewHelloAssembler creates an empty HelloAssembler.
 func NewHelloAssembler() *HelloAssembler { return &HelloAssembler{} }
 
-// Add feeds one more segment's payload in, in capture order. ready is the
+// Feed feeds one more segment's payload in, in capture order. ready is the
 // joined record bytes once a complete TLS record has arrived; done reports
-// whether the caller should stop calling Add for this flow, whether or not
+// whether the caller should stop calling Feed for this flow, whether or not
 // ready came back non-nil.
-func (h *HelloAssembler) Add(seq uint32, payload []byte) (ready []byte, done bool) {
+func (h *HelloAssembler) Feed(seq uint32, payload []byte) (ready []byte, done bool) {
 	if len(payload) == 0 {
 		return nil, false
 	}

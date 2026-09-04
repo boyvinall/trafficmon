@@ -57,9 +57,7 @@ type connKey struct {
 // reports — or, within GracePeriod of it vanishing, last reported — plus
 // whatever traffic counters capture has for it.
 type ConnectionRecord struct {
-	// PID is the process that owns the socket, straight from procinfo: there
-	// is no attribution to get wrong, since the connection only exists in
-	// the first place because procinfo enumerated it on that PID.
+	// PID is the process that owns the socket, as procinfo reported it.
 	PID         int32
 	ProcessName string
 
@@ -108,13 +106,7 @@ type ConnectionRecord struct {
 // it closing, or — for a protocol with no state concept — it has gone quiet
 // after having carried traffic.
 func (r ConnectionRecord) Closed(now time.Time) bool {
-	if r.Vanished {
-		return true
-	}
-	if r.State != "" {
-		return closingTCPState(r.State)
-	}
-	return !r.LastSeen.IsZero() && now.Sub(r.LastSeen) > IdleThreshold
+	return closed(r.Vanished, r.State, r.LastSeen, now)
 }
 
 // closingTCPState reports whether state is one of the kernel's winding-down
@@ -127,6 +119,20 @@ func closingTCPState(state string) bool {
 	default:
 		return false
 	}
+}
+
+// closed implements ConnectionRecord.Closed and Row.Closed, which share this
+// rule exactly: vanished from the poller's enumeration, a TCP state that
+// shows the connection closing, or — for a protocol with no state concept —
+// gone quiet after having carried traffic.
+func closed(vanished bool, state string, lastSeen, now time.Time) bool {
+	if vanished {
+		return true
+	}
+	if state != "" {
+		return closingTCPState(state)
+	}
+	return !lastSeen.IsZero() && now.Sub(lastSeen) > IdleThreshold
 }
 
 // less orders records deterministically. Records come out of a map, so
@@ -201,13 +207,7 @@ type Row struct {
 // Closed reports whether the row should render dimmed. See
 // ConnectionRecord.Closed; the same rule applies at the row level.
 func (r Row) Closed(now time.Time) bool {
-	if r.Vanished {
-		return true
-	}
-	if r.State != "" {
-		return closingTCPState(r.State)
-	}
-	return !r.LastSeen.IsZero() && now.Sub(r.LastSeen) > IdleThreshold
+	return closed(r.Vanished, r.State, r.LastSeen, now)
 }
 
 // Snapshot is everything the UI needs for one frame.
@@ -247,16 +247,43 @@ func New(c *capture.Capturer, p *procinfo.Poller) *Aggregator {
 // Refresh performs the join: the poller's open-connection list x capture's
 // flow counters, producing the connection records the views are built from.
 func (a *Aggregator) Refresh(now time.Time) Snapshot {
-	snap := a.join(a.poll.Connections(), a.cap.Snapshot(now), now)
+	conns := a.poll.Connections()
+	snap := a.join(conns, a.cap.Snapshot(now), now)
 
 	// Drop the counters behind whatever can no longer possibly be on
 	// screen. The capture side never forgets a flow on its own, so without
 	// this its table grows by one counter per connection ever seen for the
 	// life of the process. The cutoff matches GracePeriod, the longest a
-	// vanished connection can still be showing its last-known bytes.
-	a.cap.Evict(now.Add(-GracePeriod))
+	// vanished connection can still be showing its last-known bytes — but a
+	// connection this poll still reports open is spared regardless of the
+	// cutoff, since an open socket that has simply gone quiet for longer
+	// than GracePeriod is not "vanished" and must keep its running totals.
+	a.cap.Evict(now.Add(-GracePeriod), openFlowKeys(conns))
 
 	return snap
+}
+
+// openFlowKeys builds the set of capture.FlowKeys backing every connection
+// procinfo currently reports open, for Aggregator.Refresh to spare from
+// eviction.
+func openFlowKeys(conns []procinfo.Connection) map[capture.FlowKey]struct{} {
+	keys := make(map[capture.FlowKey]struct{}, len(conns))
+	for _, c := range conns {
+		keys[flowKeyFor(c)] = struct{}{}
+	}
+	return keys
+}
+
+// flowKeyFor builds the capture.FlowKey a procinfo connection's flow counter
+// is stored under.
+func flowKeyFor(c procinfo.Connection) capture.FlowKey {
+	return capture.FlowKey{
+		LocalAddr:  c.LocalAddr,
+		LocalPort:  c.LocalPort,
+		RemoteAddr: c.RemoteAddr,
+		RemotePort: c.RemotePort,
+		Proto:      protoFromString(c.Proto),
+	}
 }
 
 // join matches every open connection to whatever capture counters exist for

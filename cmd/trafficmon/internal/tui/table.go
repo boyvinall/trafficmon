@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -647,5 +648,8 @@ func humanBytes(n uint64) string {
 
 // humanRate formats a throughput for display, e.g. "2.1 MB/s".
 func humanRate(bps float64) string {
+	if math.IsNaN(bps) || bps < 0 {
+		bps = 0
+	}
 	return humanBytes(uint64(bps)) + "/s"
 }

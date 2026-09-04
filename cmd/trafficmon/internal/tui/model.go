@@ -61,6 +61,13 @@ const maxFilterLabel = 16
 type tickMsg time.Time
 
 // Model is the root Bubble Tea model.
+//
+// Its methods follow one rule for receivers: a pointer receiver mutates the
+// local copy Update is holding (moveCursor, refresh, setSort, and the rest of
+// that family), while a value receiver only ever reads it (View,
+// resolveHostname, and everything Bubble Tea itself calls). Neither kind
+// needs to return a changed Model — Update passes its own copy by pointer to
+// every mutator it calls, then returns that same copy.
 type Model struct {
 	agg *aggregate.Aggregator
 	// resolver turns remote addresses into hostnames. It answers from cache
@@ -173,8 +180,8 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 //
 // It is a package-level function, not just a Model method, so a plain-mode
 // renderer could name destinations exactly the way the interactive table
-// does without needing a Model of its own — see Model.hostname, its bound
-// form.
+// does without needing a Model of its own — see Model.resolveHostname, its
+// bound form.
 func Hostname(ctx context.Context, res *dns.Resolver, hostnameCache *dpi.HostnameCache, now time.Time, r aggregate.Row) string {
 	if r.Hostname != "" {
 		return r.Hostname
@@ -193,10 +200,10 @@ func Hostname(ctx context.Context, res *dns.Resolver, hostnameCache *dpi.Hostnam
 	return res.Lookup(ctx, r.RemoteAddr)
 }
 
-// hostname is Hostname bound to the resolver, cache and context this Model
-// was built with, which is the form the table columns and the filter call it
-// in.
-func (m Model) hostname(r aggregate.Row) string {
+// resolveHostname is Hostname bound to the resolver, cache and context this
+// Model was built with, which is the form the table columns and the filter
+// call it in.
+func (m Model) resolveHostname(r aggregate.Row) string {
 	return Hostname(m.ctx, m.resolver, m.hostnameCache, m.now, r)
 }
 
@@ -443,7 +450,7 @@ func (m *Model) refresh(now time.Time) {
 // exercised with hand-built inputs, no live capture and no root.
 func (m *Model) rebuild() {
 	rows := aggregate.Rows(m.snap, m.grouping)
-	rows = filterRows(rows, m.filter, m.hostname)
+	rows = filterRows(rows, m.filter, m.resolveHostname)
 	sortRows(rows, m.sort)
 	m.setRows(rows)
 }
@@ -574,7 +581,7 @@ func (m Model) viewHeader() string {
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
-	cols := fitColumns(tableColumns(m.grouping, m.hostname), m.viewWidth())
+	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname), m.viewWidth())
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {

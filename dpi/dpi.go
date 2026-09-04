@@ -7,6 +7,21 @@
 // below without that loop needing protocol knowledge.
 package dpi
 
+// port443 is the well-known port for TLS and QUIC (HTTP/3) alike. A
+// connection negotiated on any other port (STARTTLS, custom ports) goes
+// undetected in this first pass.
+const port443 = 443
+
+// recoverPanic recovers from a panic in an Inspect implementation, deferred
+// as `defer recoverPanic()`. Every Inspect parses bytes the remote endpoint
+// controls — a malformed or truncated record must not be allowed to take the
+// capture loop down with it — and none of them assign their named results
+// before the parse that might panic, so recovering here is enough: the
+// results are still at their zero value.
+func recoverPanic() {
+	recover() //nolint:errcheck // discarding the panic value is the point
+}
+
 // CandidatePacket is the cheap, already-decoded slice of one packet's
 // metadata an Inspector's Candidate uses to decide whether Inspect is worth
 // its cost. It carries nothing that requires touching the payload — callers

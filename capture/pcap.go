@@ -110,8 +110,16 @@ func (c *Capturer) Run(ctx context.Context) error {
 		return fmt.Errorf("SnapLen %d out of range [1, %d]", c.cfg.SnapLen, math.MaxInt32)
 	}
 
-	ifaces := []string{c.cfg.Interface}
-	if c.cfg.IncludeLoopback && c.cfg.Interface != loopbackInterface {
+	iface := c.cfg.Interface
+	if iface == "" {
+		var err error
+		if iface, err = DefaultInterface(); err != nil {
+			return fmt.Errorf("detect interface: %w", err)
+		}
+	}
+
+	ifaces := []string{iface}
+	if c.cfg.IncludeLoopback && iface != loopbackInterface {
 		// Loopback traffic never reaches the primary interface, so it needs a
 		// handle of its own feeding the same flow map.
 		ifaces = append(ifaces, loopbackInterface)
@@ -230,6 +238,13 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) *By
 // flow is marked attempted either way, hit or miss, with no continuation
 // state to track.
 //
+// Only the first Inspector in c.cfg.Inspectors whose Candidate accepts a
+// given packet is asked: a later one that would also have accepted the same
+// packet never gets a look, hit or miss. This holds today because no two
+// configured Inspectors' Candidate implementations overlap (see
+// DefaultInspectors), but it means combining Inspectors whose candidates do
+// overlap is not supported without changing this function.
+//
 // data is the same zero-copy buffer the capture loop just read; it is used
 // here and only here, before the loop's next ZeroCopyReadPacketData call
 // invalidates it. extractPayload builds its gopacket.Packet directly over
@@ -250,11 +265,19 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 	}
 
 	inProgress := cand.IsTCP && ctr.HelloInProgress()
+	// A continuation must go back to the same inspector that started the
+	// reassembly — not just any inspector willing to look — so a second
+	// TCP-capable Inspector in the list can never hijack another one's
+	// in-progress hello.
+	wantInspector := ""
+	if inProgress {
+		wantInspector = ctr.HelloInspector()
+	}
 	for _, insp := range c.cfg.Inspectors {
 		switch {
 		case inProgress:
-			if !cand.Outbound {
-				continue // a continuation only cares about this flow's own outbound bytes
+			if !cand.Outbound || insp.Name() != wantInspector {
+				continue // a continuation only cares about this flow's own outbound bytes, on its own inspector
 			}
 		case !insp.Candidate(cand):
 			continue
@@ -277,7 +300,7 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 			return
 		}
 
-		ready, done := ctr.AddHelloSegment(seq, payload)
+		ready, done := ctr.AddHelloSegment(insp.Name(), seq, payload)
 		if ready != nil {
 			if host, ok := insp.Inspect(ready); ok {
 				ctr.SetHostname(host)
@@ -358,22 +381,30 @@ func extractPayload(data []byte, linkType layers.LinkType, isTCP bool) (seq uint
 	return 0, udp.LayerPayload(), true
 }
 
-// Evict drops every flow last seen before the cutoff and reports how many it
-// removed.
+// Evict drops every flow last seen before the cutoff, except any in keep, and
+// reports how many it removed.
 //
 // Nothing else ever removes a flow, so without this the table grows by one
 // counter per connection the host has ever made and never shrinks — a leak
 // that only shows up on a long run. The aggregator calls it with the grace
-// period's cutoff, once a flow is too stale to appear in the UI at all: a
-// packet arriving on an evicted flow afterwards simply starts a fresh counter,
-// which is the same thing the UI would show for a brand new connection.
-func (c *Capturer) Evict(before time.Time) int {
+// period's cutoff, once a flow is too stale to appear in the UI at all — but
+// an idle flow can still back a connection procinfo reports as open, and
+// losing its counters would zero out a live connection's totals rather than
+// just stop showing a vanished one. keep is that set of still-open
+// connections' flow keys, spared regardless of how long they have been
+// quiet; a packet arriving on a genuinely evicted flow afterwards simply
+// starts a fresh counter, which is the same thing the UI would show for a
+// brand new connection.
+func (c *Capturer) Evict(before time.Time, keep map[FlowKey]struct{}) int {
 	// Snapshot the candidate keys under a read lock first: LastSeen on every
 	// counter would otherwise serialise against the write lock the hot record
 	// path also needs, for the whole sweep rather than just the deletions.
 	c.mu.RLock()
 	stale := make([]FlowKey, 0, len(c.flows))
 	for k, ctr := range c.flows {
+		if _, spared := keep[k]; spared {
+			continue
+		}
 		if ctr.LastSeen().Before(before) {
 			stale = append(stale, k)
 		}

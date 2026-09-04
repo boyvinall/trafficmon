@@ -65,9 +65,10 @@ const rateWindow = 5 * time.Second
 // rateBuckets is the number of one-second buckets covering rateWindow.
 const rateBuckets = 5
 
-// ByteCounter accumulates traffic for a single flow: monotonic totals since
+// ByteCounter accumulates traffic for a single flow — monotonic totals since
 // process start, plus a small ring of per-second buckets used to derive the
-// live rate.
+// live rate — and also holds that flow's DPI hostname-detection state: what,
+// if anything, has been found so far, and any in-progress hello reassembly.
 type ByteCounter struct {
 	mu sync.Mutex
 
@@ -93,6 +94,11 @@ type ByteCounter struct {
 	// ClientHello when its SNI extension is split across more than one TCP
 	// segment. Created lazily on the first candidate packet; nil until then.
 	assembler *dpi.HelloAssembler
+	// helloInspector is the Name() of whichever Inspector started assembler,
+	// so a continuation packet on this flow keeps going to that same
+	// inspector rather than whichever one Capturer.inspect happens to try
+	// first while a hello is in progress.
+	helloInspector string
 }
 
 // advance rolls the ring forward to the second containing now, zeroing every
@@ -225,14 +231,24 @@ func (c *ByteCounter) HelloInProgress() bool {
 }
 
 // AddHelloSegment feeds one candidate packet's TCP payload into this flow's
-// hello reassembly, creating it on first use.
-func (c *ByteCounter) AddHelloSegment(seq uint32, payload []byte) (ready []byte, done bool) {
+// hello reassembly, creating it on first use and recording inspectorName as
+// the one to keep routing this flow's continuations to (see HelloInspector).
+func (c *ByteCounter) AddHelloSegment(inspectorName string, seq uint32, payload []byte) (ready []byte, done bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.assembler == nil {
 		c.assembler = dpi.NewHelloAssembler()
+		c.helloInspector = inspectorName
 	}
-	return c.assembler.Add(seq, payload)
+	return c.assembler.Feed(seq, payload)
+}
+
+// HelloInspector returns the Name() of the Inspector a hello reassembly is
+// already under way for, or "" if HelloInProgress is false.
+func (c *ByteCounter) HelloInspector() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.helloInspector
 }
 
 // normalise folds a packet's 5-tuple onto the FlowKey that both directions of

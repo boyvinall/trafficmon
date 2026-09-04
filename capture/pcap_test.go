@@ -543,7 +543,7 @@ func TestCapturerEvictDropsStaleFlows(t *testing.T) {
 	c.record(fresh, now, 100, true)
 	c.record(stale, now.Add(-time.Minute), 100, true)
 
-	if n := c.Evict(now.Add(-30 * time.Second)); n != 1 {
+	if n := c.Evict(now.Add(-30*time.Second), nil); n != 1 {
 		t.Fatalf("Evict() removed %d flows, want 1", n)
 	}
 	if _, ok := c.flows[stale]; ok {
@@ -554,8 +554,31 @@ func TestCapturerEvictDropsStaleFlows(t *testing.T) {
 	}
 
 	// A second pass with the same cutoff has nothing left to do.
-	if n := c.Evict(now.Add(-30 * time.Second)); n != 0 {
+	if n := c.Evict(now.Add(-30*time.Second), nil); n != 0 {
 		t.Errorf("second Evict() removed %d flows, want 0", n)
+	}
+}
+
+func TestCapturerEvictSparesKeptFlows(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	kept := FlowKey{LocalAddr: mustAddr(t, "10.0.0.1"), LocalPort: 1, Proto: ProtoTCP}
+	stale := FlowKey{LocalAddr: mustAddr(t, "10.0.0.1"), LocalPort: 2, Proto: ProtoTCP}
+
+	// Both flows are equally stale by LastSeen; only keep should survive.
+	c.record(kept, now.Add(-time.Minute), 100, true)
+	c.record(stale, now.Add(-time.Minute), 100, true)
+
+	keep := map[FlowKey]struct{}{kept: {}}
+	if n := c.Evict(now.Add(-30*time.Second), keep); n != 1 {
+		t.Fatalf("Evict() removed %d flows, want 1", n)
+	}
+	if _, ok := c.flows[stale]; ok {
+		t.Error("stale flow survived Evict()")
+	}
+	if _, ok := c.flows[kept]; !ok {
+		t.Error("Evict() removed a flow it was told to keep")
 	}
 }
 
@@ -578,7 +601,7 @@ func TestCapturerEvictConcurrentWithRecord(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 200 {
-			c.Evict(now.Add(time.Second))
+			c.Evict(now.Add(time.Second), nil)
 		}
 	}()
 

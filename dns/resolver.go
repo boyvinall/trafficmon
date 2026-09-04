@@ -100,16 +100,19 @@ func WithLookupTimeout(d time.Duration) Option {
 }
 
 // WithMaxConcurrent overrides maxConcurrent, the number of reverse queries
-// allowed in flight at once.
+// allowed in flight at once. n below 1 is treated as 1, since 0 would
+// silently disable all lookups and a negative n would panic the buffered
+// channel NewResolverWith allocates from it.
 func WithMaxConcurrent(n int) Option {
-	return func(r *Resolver) { r.maxConcurrent = n }
+	return func(r *Resolver) { r.maxConcurrent = max(n, 1) }
 }
 
 // WithMaxCacheEntries overrides maxCacheEntries, the size of one generation
 // of the cache. See put for why that bounds the whole thing at twice this
-// number.
+// number. n below 1 is treated as 1, since put rotates generations on every
+// write once maxCacheEntries is non-positive.
 func WithMaxCacheEntries(n int) Option {
-	return func(r *Resolver) { r.maxCacheEntries = n }
+	return func(r *Resolver) { r.maxCacheEntries = max(n, 1) }
 }
 
 // NewResolver returns an empty resolver that asks the system resolver.
@@ -154,6 +157,13 @@ func NewResolverWith(lookup func(ctx context.Context, addr string) ([]string, er
 // rather than being retried on every tick. ctx is the parent of the background
 // query: cancelling it abandons the lookup without recording that failure,
 // since a program shutting down says nothing about whether the name exists.
+//
+// Only the ctx passed by whichever call actually starts the background query
+// bounds it: while that query is in flight, every later Lookup for the same
+// ip returns immediately without even looking at the ctx it was given. A
+// caller relying on its own ctx to bound every call it makes, rather than
+// just the first, should not assume cancelling one call's ctx affects a
+// lookup another call already started.
 func (r *Resolver) Lookup(ctx context.Context, ip string) string {
 	// ByProcess rows carry no destination, so a caller that resolves every row
 	// uniformly hands the empty string over rather than having to know which
@@ -192,12 +202,41 @@ func (r *Resolver) Lookup(ctx context.Context, ip string) string {
 }
 
 // resolve performs one background query and records what it found.
+//
+// It runs r.lookup on its own goroutine rather than inline, and releases its
+// semaphore slot the instant queryCtx expires rather than waiting on that
+// goroutine — lookup is r.timeout's only enforcer for a real net.Resolver,
+// but not every platform resolver actually honors a context deadline for a
+// reverse (PTR) query, and a lookup call that outlives its deadline must not
+// pin a slot forever: with maxConcurrent capped low, enough stuck queries
+// would wedge every future lookup. The stray goroutine is simply abandoned to
+// finish or never finish on its own; its answer, if it ever arrives, is
+// discarded rather than recorded, since by then a fresher attempt may already
+// own the address.
 func (r *Resolver) resolve(ctx context.Context, ip string) {
 	defer func() { <-r.sem }()
 
 	queryCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	names, err := r.lookup(queryCtx, ip)
+
+	type answer struct {
+		names []string
+		err   error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		names, err := r.lookup(queryCtx, ip)
+		done <- answer{names: names, err: err}
+	}()
+
+	var names []string
+	var err error
+	select {
+	case a := <-done:
+		names, err = a.names, a.err
+	case <-queryCtx.Done():
+		err = queryCtx.Err()
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
