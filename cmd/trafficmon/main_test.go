@@ -53,11 +53,6 @@ func TestIsShutdown(t *testing.T) {
 			err:  errors.New("open en0: permission denied"),
 			want: false,
 		},
-		{
-			name: "the render loop panicked",
-			err:  fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrProgramPanic),
-			want: false,
-		},
 	}
 
 	for _, tc := range tests {

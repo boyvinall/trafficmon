@@ -15,7 +15,7 @@ socket to enumerate, so those rows come from capture alone and carry no PID.
 ## Requirements
 
 - macOS
-- Go 1.25+
+- Go 1.22+
 - Xcode Command Line Tools (`xcode-select --install`) — the `procinfo` package
   uses cgo to bind `libproc`
 - `libpcap` (ships with macOS)

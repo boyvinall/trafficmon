@@ -59,7 +59,7 @@ func DefaultInterface() (string, error) {
 // parseRouteInterface pulls the device name out of `route -n get default`
 // output, which reports it on an indented "interface: en0" line.
 func parseRouteInterface(out string) (string, error) {
-	for line := range strings.SplitSeq(out, "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		rest, found := strings.CutPrefix(strings.TrimSpace(line), "interface:")
 		if !found {
 			continue

@@ -127,13 +127,11 @@ func run(ctx context.Context, cmd *cli.Command) error {
 // is — the user pressing q, which cancels the context capture and polling run
 // under — through as a failure and print it on the way out.
 //
-// A panic is deliberately not on the list even though bubbletea wraps that in
-// ErrProgramKilled as well: a render loop that crashed is exactly the kind of
-// thing that must not be filtered away as routine.
+// A render loop panic isn't distinguishable here: this bubbletea version
+// recovers it internally, prints the stack trace, and returns a nil error
+// from Run(), so it surfaces to the user only as that stack trace, not as a
+// nonzero exit.
 func isShutdown(err error) bool {
-	if errors.Is(err, tea.ErrProgramPanic) {
-		return false
-	}
 	return errors.Is(err, context.Canceled) ||
 		errors.Is(err, tea.ErrProgramKilled) ||
 		errors.Is(err, tea.ErrInterrupted)
