@@ -10,8 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/boyvinall/trafficmon/dpi"
 )
 
 // bpfFilter keeps the kernel from handing us anything the decoder cannot use:
@@ -35,14 +38,24 @@ type Config struct {
 	// IncludeLoopback captures lo0 traffic as well as the primary interface.
 	IncludeLoopback bool
 
-	// SnapLen is the per-packet capture length. Headers only is enough: the
-	// payload length comes from the IP header, not the captured bytes.
+	// SnapLen is the per-packet capture length. It has to cover more than
+	// headers now that DPI inspects payload bytes: 1600 covers any TLS
+	// ClientHello that fits in a single packet, since that is itself bounded
+	// by the ~1500-byte link MTU almost everywhere, with margin for the
+	// Ethernet/VLAN header. It does not cover a ClientHello fragmented
+	// across multiple TCP segments (large post-quantum key_share/ECH
+	// configs can do this) — that needs TCP reassembly, which is out of
+	// scope; such a flow's SNI simply goes undetected.
 	SnapLen int
+
+	// Inspectors are the DPI routines run against each flow's early packets
+	// to identify a hostname. Nil or empty disables DPI entirely.
+	Inspectors []dpi.Inspector
 }
 
 // DefaultConfig returns the capture defaults.
 func DefaultConfig() Config {
-	return Config{SnapLen: 128}
+	return Config{SnapLen: 1600, Inspectors: dpi.DefaultInspectors()}
 }
 
 // Capturer owns the pcap handle and the flow table it feeds.
@@ -51,14 +64,25 @@ type Capturer struct {
 
 	mu    sync.RWMutex
 	flows map[FlowKey]*ByteCounter
+
+	// hostnameCache is the per-IP fallback: a flow with no hostname of its own
+	// can borrow the most recent one DPI found for the same remote IP.
+	hostnameCache *dpi.HostnameCache
 }
 
 // New creates a Capturer. It does not open the interface; call Run for that.
 func New(cfg Config) *Capturer {
 	return &Capturer{
-		cfg:   cfg,
-		flows: make(map[FlowKey]*ByteCounter),
+		cfg:           cfg,
+		flows:         make(map[FlowKey]*ByteCounter),
+		hostnameCache: dpi.NewHostnameCache(dpi.DefaultHostnameCacheCapacity, dpi.DefaultHostnameCacheTTL),
 	}
+}
+
+// HostnameCache returns the per-IP hostname fallback cache DPI populates, for the
+// UI to consult when a connection has no hostname of its own.
+func (c *Capturer) HostnameCache() *dpi.HostnameCache {
+	return c.hostnameCache
 }
 
 // Run opens the interface and decodes packets into the flow table. If ctx is
@@ -149,14 +173,15 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		if ts.IsZero() {
 			ts = time.Now()
 		}
-		c.record(key, ts, info.Bytes, inbound)
+		ctr := c.record(key, ts, info.Bytes, inbound)
+		c.inspect(data, info, inbound, dec.linkType, key.RemoteAddr, ctr, ts)
 	}
 }
 
-// record credits n bytes to a flow, creating its counter on first sight. The
-// map lock is released before the counter is touched so that a Snapshot never
-// waits on per-flow bookkeeping.
-func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) {
+// record credits n bytes to a flow, creating its counter on first sight, and
+// returns that counter. The map lock is released before the counter is
+// touched so that a Snapshot never waits on per-flow bookkeeping.
+func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) *ByteCounter {
 	c.mu.RLock()
 	ctr := c.flows[key]
 	c.mu.RUnlock()
@@ -173,6 +198,47 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) {
 	}
 
 	ctr.Add(ts, n, inbound)
+	return ctr
+}
+
+// inspect runs the configured Inspectors against one packet already
+// attributed to ctr's flow, stopping at the first one willing to look. It is
+// a no-op once ctr no longer needs inspection (see
+// ByteCounter.NeedsHostnameInspection) — a ClientHello, if there is one, is
+// on the first data-carrying packet of the connection, so re-parsing every
+// later packet on a long-lived flow would spend CPU for no further benefit.
+//
+// data is the same zero-copy buffer the capture loop just read; it is used
+// here and only here, before the loop's next ZeroCopyReadPacketData call
+// invalidates it. An Inspector builds its gopacket.Packet directly over data
+// with gopacket.NoCopy, so nothing here copies it — the one copy that does
+// happen is the hostname string an Inspector hands back, a few dozen bytes
+// already an owned Go string by the time Inspect returns it.
+func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType layers.LinkType, remote netip.Addr, ctr *ByteCounter, ts time.Time) {
+	if len(c.cfg.Inspectors) == 0 || !ctr.NeedsHostnameInspection() {
+		return
+	}
+
+	cand := dpi.CandidatePacket{
+		IsTCP:       info.Proto == ProtoTCP,
+		SrcPort:     info.SrcPort,
+		DstPort:     info.DstPort,
+		Outbound:    !inbound,
+		DatagramLen: int(info.Bytes),
+	}
+	for _, insp := range c.cfg.Inspectors {
+		if !insp.Candidate(cand) {
+			continue
+		}
+		if host, ok := insp.Inspect(data, linkType); ok {
+			ctr.SetHostname(host)
+			c.hostnameCache.Put(remote.String(), host, ts)
+		}
+		// A candidate packet was examined either way: don't keep retrying
+		// this flow on every subsequent packet.
+		ctr.MarkHostnameAttempted()
+		return
+	}
 }
 
 // Evict drops every flow last seen before the cutoff and reports how many it
@@ -231,6 +297,7 @@ func (c *Capturer) Snapshot(now time.Time) map[FlowKey]FlowStats {
 			RateInBps:  rIn,
 			RateOutBps: rOut,
 			LastSeen:   ctr.LastSeen(),
+			Hostname:   ctr.Hostname(),
 		}
 	}
 	return out
@@ -243,6 +310,9 @@ type FlowStats struct {
 	RateInBps  float64
 	RateOutBps float64
 	LastSeen   time.Time
+	// Hostname is the hostname DPI identified for this flow, or "" if none
+	// has been found.
+	Hostname string
 }
 
 // ListInterfaces returns the interfaces libpcap can capture on. Requires root.

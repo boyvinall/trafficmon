@@ -245,20 +245,21 @@ func TestFlowDecoderSkipsUnattributablePackets(t *testing.T) {
 }
 
 // TestFlowDecoderCountsFullDatagramWhenTruncated pins down the reason the byte
-// count comes from the IP header: at the default SnapLen every full-size
-// packet arrives clipped, and counting the captured bytes would undercount a
-// busy flow by an order of magnitude.
+// count comes from the IP header rather than the captured length: a packet
+// big enough to run past SnapLen — a jumbo frame, or a TLS record with enough
+// extensions — would otherwise undercount, and the default snap length case
+// below is built large enough to still be one of those.
 func TestFlowDecoderCountsFullDatagramWhenTruncated(t *testing.T) {
 	full := serialize(t,
 		ethernet(layers.EthernetTypeIPv4),
 		ipv4(layers.IPProtocolTCP),
 		// A long option list plus a big payload, so both the transport header
-		// and the data run past the snap length.
+		// and the data run past every snap length below, the default included.
 		&layers.TCP{SrcPort: 51000, DstPort: 443, DataOffset: 15, Options: []layers.TCPOption{{
 			OptionType: layers.TCPOptionKindTimestamps, OptionLength: 34,
 			OptionData: bytes.Repeat([]byte{1}, 32),
 		}}},
-		gopacket.Payload(bytes.Repeat([]byte{0xAB}, 1400)))
+		gopacket.Payload(bytes.Repeat([]byte{0xAB}, 1600)))
 
 	// The whole Ethernet frame minus its 14 byte header is the IP datagram.
 	wantBytes := uint64(len(full) - 14)
@@ -279,7 +280,7 @@ func TestFlowDecoderCountsFullDatagramWhenTruncated(t *testing.T) {
 				t.Fatalf("newFlowDecoder: %v", err)
 			}
 
-			got, ok := dec.decode(full[:snapLen])
+			got, ok := dec.decode(full[:min(snapLen, len(full))])
 			if !ok {
 				t.Fatal("decode() dropped a truncated packet; the ports should still be readable")
 			}

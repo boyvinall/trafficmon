@@ -80,6 +80,13 @@ type ByteCounter struct {
 	bucketStart time.Time
 
 	lastSeen time.Time
+
+	// hostname is the first hostname DPI found for this flow, or "" if none
+	// has been found (or DPI hasn't run for this flow yet).
+	hostname string
+	// hostnameAttempted is true once DPI has examined one candidate packet
+	// on this flow, whether or not it found a hostname.
+	hostnameAttempted bool
 }
 
 // advance rolls the ring forward to the second containing now, zeroing every
@@ -165,6 +172,41 @@ func (c *ByteCounter) LastSeen() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastSeen
+}
+
+// Hostname returns the hostname DPI has identified for this flow's remote
+// endpoint, or "" if none has been found.
+func (c *ByteCounter) Hostname() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hostname
+}
+
+// SetHostname records the first hostname DPI finds for this flow.
+// First-write-wins: a flow's own SNI is set once, from its own ClientHello,
+// and never contradicted by anything later seen on the same flow.
+func (c *ByteCounter) SetHostname(host string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hostname == "" {
+		c.hostname = host
+	}
+}
+
+// NeedsHostnameInspection reports whether DPI should still look at this
+// flow's packets for a hostname.
+func (c *ByteCounter) NeedsHostnameInspection() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hostname == "" && !c.hostnameAttempted
+}
+
+// MarkHostnameAttempted records that DPI has already examined one candidate
+// packet on this flow, whether or not it found a hostname.
+func (c *ByteCounter) MarkHostnameAttempted() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hostnameAttempted = true
 }
 
 // normalise folds a packet's 5-tuple onto the FlowKey that both directions of

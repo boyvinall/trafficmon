@@ -6,6 +6,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/dreadl0ck/tlsx v1.2.0
 	github.com/gopacket/gopacket v1.7.1
 	github.com/muesli/termenv v0.16.0
 	github.com/urfave/cli/v3 v3.11.0
@@ -31,6 +32,7 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.3.8 // indirect
+	golang.org/x/text v0.30.0 // indirect
 )

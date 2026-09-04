@@ -30,11 +30,12 @@ type packetInfo struct {
 	// Bytes is the size of the whole IP datagram — IP header, transport
 	// header and payload — taken from the IP header's own length field.
 	//
-	// It deliberately is not the captured length: SnapLen is small enough
-	// that anything but a bare ACK arrives truncated, so len(data) would
-	// undercount badly. It also excludes link-layer framing, so the same
-	// connection totals the same whether it was seen over Ethernet or over
-	// the loopback pseudo-header.
+	// It deliberately is not the captured length: that excludes link-layer
+	// framing, so the same connection totals the same whether it was seen
+	// over Ethernet or over the loopback pseudo-header. It also still holds
+	// even for the rare packet SnapLen truncates (a jumbo frame, or a
+	// ClientHello with enough extensions to run past it) — len(data) alone
+	// would undercount those.
 	//
 	// ARP has no length field of its own to read here, so it uses
 	// arpFrameBytes instead — see the ARP case in decode.
@@ -100,6 +101,11 @@ type flowDecoder struct {
 
 	parser  *gopacket.DecodingLayerParser
 	decoded []gopacket.LayerType
+
+	// linkType is the pcap handle's link type, kept alongside the decoder so
+	// DPI inspectors can build a gopacket.Packet from raw capture bytes
+	// without re-deriving it per packet.
+	linkType layers.LinkType
 }
 
 // newFlowDecoder builds a decoder for the link type of one pcap handle.
@@ -120,7 +126,7 @@ func newFlowDecoder(linkType layers.LinkType) (*flowDecoder, error) {
 		return nil, fmt.Errorf("unsupported link type %s", linkType)
 	}
 
-	d := &flowDecoder{decoded: make([]gopacket.LayerType, 0, 4)}
+	d := &flowDecoder{decoded: make([]gopacket.LayerType, 0, 4), linkType: linkType}
 	d.parser = gopacket.NewDecodingLayerParser(first,
 		&d.eth, &d.loop, &d.dot1q, &d.ip4, &d.ip6, &d.ports, &d.icmp4, &d.icmp6, &d.arp)
 	// Anything with no decoder here — ESP, an exotic IPv6 extension header —

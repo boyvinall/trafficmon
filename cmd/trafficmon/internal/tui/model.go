@@ -15,6 +15,7 @@ import (
 
 	"github.com/boyvinall/trafficmon/aggregate"
 	"github.com/boyvinall/trafficmon/dns"
+	"github.com/boyvinall/trafficmon/dpi"
 )
 
 // TickInterval is the render cadence. It is deliberately independent of both
@@ -65,6 +66,10 @@ type Model struct {
 	// resolver turns remote addresses into hostnames. It answers from cache
 	// and never blocks, so View may call it freely; see dns.Resolver.
 	resolver *dns.Resolver
+	// hostnameCache is the per-IP fallback DPI populates: a connection with no
+	// SNI of its own can borrow the most recent hostname found for the same
+	// remote IP. May be nil, in which case that fallback step is skipped.
+	hostnameCache *dpi.HostnameCache
 	// ctx is the program's lifetime, held so that the background lookups the
 	// render loop starts are wound up with it. Bubble Tea hands Update and
 	// View no context of their own, and the alternative — resolving against
@@ -121,8 +126,9 @@ type Model struct {
 }
 
 // NewModel builds the root model. ctx bounds the reverse-DNS lookups the view
-// starts; res may be nil, in which case destinations are never named.
-func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, iface string) Model {
+// starts; res and hostnameCache may each be nil, in which case the hostname
+// sources they provide are simply skipped.
+func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, hostnameCache *dpi.HostnameCache, iface string) Model {
 	input := textinput.New()
 	input.Prompt = filterPrompt
 
@@ -134,42 +140,64 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 	input.Cursor.SetMode(cursor.CursorStatic)
 
 	return Model{
-		agg:      agg,
-		resolver: res,
-		ctx:      ctx,
-		iface:    iface,
-		keys:     DefaultKeyMap(),
-		styles:   DefaultStyles(),
-		help:     help.New(),
-		input:    input,
+		agg:           agg,
+		resolver:      res,
+		hostnameCache: hostnameCache,
+		ctx:           ctx,
+		iface:         iface,
+		keys:          DefaultKeyMap(),
+		styles:        DefaultStyles(),
+		help:          help.New(),
+		input:         input,
 	}
 }
 
-// Hostname returns the reverse-resolved name for a row's destination, falling
-// back to the bare address until — or unless — one is known.
+// Hostname returns the name to show for a row's destination, in priority
+// order: the row's own DPI-detected hostname, the per-IP fallback cache
+// (another connection to the same remote address — possibly serving a
+// different hostname, but a reasonable guess when this one has none of its
+// own), reverse DNS, and finally the bare address.
+//
+// r.Hostname is checked first and, if present, returned outright: it is a
+// first-party, per-connection fact (see aggregate.Row.Hostname), unlike the
+// fallback cache or a PTR record, either of which can be stale or simply
+// wrong for this specific connection.
 //
 // It is safe to call from a render loop: dns.Resolver answers from its cache
 // and starts anything it is missing in the background, so a frame is never
-// held up by a query. A newly resolved name therefore appears on the next
-// refresh rather than the moment it lands, which is the whole point: the
-// table redraws every second anyway, so there is nothing for a notification
-// to make happen sooner than the frame that was coming regardless.
+// held up by a query, and hostnameCache.Get never blocks either. A newly
+// resolved name therefore appears on the next refresh rather than the moment
+// it lands, which is the whole point: the table redraws every second anyway,
+// so there is nothing for a notification to make happen sooner than the
+// frame that was coming regardless.
 //
-// It is a package-level function, not just a Model method, so the plain-mode
-// renderer can name destinations exactly the way the interactive table does
-// without needing a Model of its own — see Model.hostname, its bound form,
-// and RenderPlain, its other caller.
-func Hostname(ctx context.Context, res *dns.Resolver, r aggregate.Row) string {
-	if r.RemoteAddr == "" || res == nil {
+// It is a package-level function, not just a Model method, so a plain-mode
+// renderer could name destinations exactly the way the interactive table
+// does without needing a Model of its own — see Model.hostname, its bound
+// form.
+func Hostname(ctx context.Context, res *dns.Resolver, hostnameCache *dpi.HostnameCache, now time.Time, r aggregate.Row) string {
+	if r.Hostname != "" {
+		return r.Hostname
+	}
+	if r.RemoteAddr == "" {
+		return r.RemoteAddr
+	}
+	if hostnameCache != nil {
+		if host, ok := hostnameCache.Get(r.RemoteAddr, now); ok {
+			return host
+		}
+	}
+	if res == nil {
 		return r.RemoteAddr
 	}
 	return res.Lookup(ctx, r.RemoteAddr)
 }
 
-// hostname is Hostname bound to the resolver and context this Model was built
-// with, which is the form the table columns and the filter call it in.
+// hostname is Hostname bound to the resolver, cache and context this Model
+// was built with, which is the form the table columns and the filter call it
+// in.
 func (m Model) hostname(r aggregate.Row) string {
-	return Hostname(m.ctx, m.resolver, r)
+	return Hostname(m.ctx, m.resolver, m.hostnameCache, m.now, r)
 }
 
 // Init starts the render ticker.

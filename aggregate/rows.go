@@ -68,6 +68,7 @@ func rowsUngrouped(snap Snapshot) []Row {
 			RemotePort: c.RemotePort,
 			Proto:      c.Proto,
 			State:      c.State,
+			Hostname:   c.Hostname,
 			Vanished:   c.Vanished,
 		}
 	})
@@ -101,6 +102,7 @@ func rowsByPID(snap Snapshot) []Row {
 				LocalAddr:  c.LocalAddr,
 				RemoteAddr: c.RemoteAddr,
 				RemotePort: c.RemotePort,
+				Hostname:   c.Hostname,
 			}
 		},
 	)
@@ -112,7 +114,7 @@ func rowsByProcessName(snap Snapshot) []Row {
 	return rollup(snap.Connections,
 		func(c ConnectionRecord) string { return processRemoteKey(c) },
 		func(c ConnectionRecord, key string) Row {
-			return Row{Key: key, Label: c.ProcessName, RemoteAddr: c.RemoteAddr, RemotePort: c.RemotePort}
+			return Row{Key: key, Label: c.ProcessName, RemoteAddr: c.RemoteAddr, RemotePort: c.RemotePort, Hostname: c.Hostname}
 		},
 	)
 }

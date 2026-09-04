@@ -245,3 +245,38 @@ func TestNormaliseIsDirectionSymmetric(t *testing.T) {
 		t.Fatalf("direction flags = (%v, %v), want (false, true)", outInbound, inInbound)
 	}
 }
+
+func TestByteCounterHostnameSetOnce(t *testing.T) {
+	c := &ByteCounter{}
+	c.SetHostname("first.example.com")
+	c.SetHostname("second.example.com")
+
+	if got := c.Hostname(); got != "first.example.com" {
+		t.Errorf("Hostname() = %q, want %q (first write wins)", got, "first.example.com")
+	}
+}
+
+func TestByteCounterNeedsHostnameInspection(t *testing.T) {
+	t.Run("true before anything happens", func(t *testing.T) {
+		c := &ByteCounter{}
+		if !c.NeedsHostnameInspection() {
+			t.Error("NeedsHostnameInspection() = false for a fresh counter")
+		}
+	})
+
+	t.Run("false once a hostname is set", func(t *testing.T) {
+		c := &ByteCounter{}
+		c.SetHostname("example.com")
+		if c.NeedsHostnameInspection() {
+			t.Error("NeedsHostnameInspection() = true after SetHostname")
+		}
+	})
+
+	t.Run("false once an attempt is marked, even with no hostname", func(t *testing.T) {
+		c := &ByteCounter{}
+		c.MarkHostnameAttempted()
+		if c.NeedsHostnameInspection() {
+			t.Error("NeedsHostnameInspection() = true after MarkHostnameAttempted")
+		}
+	})
+}

@@ -139,6 +139,43 @@ func TestJoinMergesTrafficOntoOpenConnections(t *testing.T) {
 	}
 }
 
+func TestJoinPropagatesHostnameFromFlowStats(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	c := conn(t, 42, "curl", 51000, "140.82.112.3", 443)
+	st := stats(4000, 1000, now)
+	st.Hostname = "example.com"
+
+	snap := a.join([]procinfo.Connection{c}, map[capture.FlowKey]capture.FlowStats{flowFor(c): st}, now)
+	got := recordFor(t, snap, "140.82.112.3", 443)
+	if got.Hostname != "example.com" {
+		t.Errorf("record.Hostname = %q, want %q", got.Hostname, "example.com")
+	}
+
+	rows := Rows(snap, GroupNone)
+	if len(rows) != 1 || rows[0].Hostname != "example.com" {
+		t.Errorf("Rows(GroupNone) = %+v, want a single row with Hostname %q", rows, "example.com")
+	}
+}
+
+func TestJoinPropagatesHostnameForICMPFlow(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	icmpKey := capture.FlowKey{
+		LocalAddr: mustAddr(t, localAddr), RemoteAddr: mustAddr(t, "1.1.1.1"), Proto: capture.ProtoICMP,
+	}
+	st := stats(100, 0, now)
+	st.Hostname = "one.one.one.one"
+
+	snap := a.join(nil, map[capture.FlowKey]capture.FlowStats{icmpKey: st}, now)
+	got := recordFor(t, snap, "1.1.1.1", 0)
+	if got.Hostname != "one.one.one.one" {
+		t.Errorf("icmp record.Hostname = %q, want %q", got.Hostname, "one.one.one.one")
+	}
+}
+
 func TestJoinShowsAConnectionWithNoTrafficYet(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
@@ -483,8 +520,8 @@ func TestRowsByPIDSumsCountersPerProcess(t *testing.T) {
 func TestRowsByPIDMergesConnectionsToTheSameDestination(t *testing.T) {
 	now := time.Now()
 	snap := Snapshot{Connections: []ConnectionRecord{
-		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 1000, LastSeen: now},
-		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 2000, LastSeen: now},
+		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 1000, LastSeen: now, Hostname: "first.example.com"},
+		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 2000, LastSeen: now, Hostname: "second.example.com"},
 	}}
 
 	rows := Rows(snap, GroupByPID)
@@ -493,6 +530,11 @@ func TestRowsByPIDMergesConnectionsToTheSameDestination(t *testing.T) {
 	}
 	if got := rows[0]; got.Connections != 2 || got.BytesInTotal != 3000 {
 		t.Errorf("row = %+v, want 2 connections and 3000 bytes in", got)
+	}
+	// Hostname has no single answer once connections are rolled together:
+	// the row keeps whichever one rollup saw first, same as LocalAddr does.
+	if got := rows[0].Hostname; got != "first.example.com" {
+		t.Errorf("row.Hostname = %q, want %q (first-seen representative value)", got, "first.example.com")
 	}
 }
 

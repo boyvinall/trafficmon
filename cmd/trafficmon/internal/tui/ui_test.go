@@ -129,7 +129,7 @@ func stubHostname(r aggregate.Row) string { return r.RemoteAddr }
 // resolver never resolves anything, which is the state every destination
 // starts in: the bare address, shown until a name arrives.
 func newTestModel(rows []aggregate.Row, width, height int) Model {
-	m := NewModel(context.Background(), nil, nil, "en0")
+	m := NewModel(context.Background(), nil, nil, nil, "en0")
 	m.rows = rows
 	m.now = testNow
 	m.width, m.height = width, height

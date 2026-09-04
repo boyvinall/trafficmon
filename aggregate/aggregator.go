@@ -86,6 +86,10 @@ type ConnectionRecord struct {
 	// time if it never has.
 	LastSeen time.Time
 
+	// Hostname is the hostname DPI identified for this connection's remote
+	// endpoint, or "" if none has been found.
+	Hostname string
+
 	// LastPolled is when procinfo's socket enumeration last actually
 	// reported this connection. It drives Vanished and the grace-period
 	// eviction in Aggregator.join, and is unrelated to LastSeen: a
@@ -171,6 +175,15 @@ type Row struct {
 	RemotePort uint16
 	Proto      string
 	State      string
+
+	// Hostname is the hostname DPI identified for this remote endpoint, or
+	// "" if none has been found. GroupByPID and GroupByProcessName seed it
+	// from whichever connection rollup happens to encounter first for that
+	// key — the same representative-value trade already made above for
+	// LocalAddr — rather than trying to reconcile it across every merged
+	// connection: a rollup accumulates the numeric fields, but a hostname
+	// has no such single answer once more than one connection is involved.
+	Hostname string
 
 	BytesInTotal  uint64
 	BytesOutTotal uint64
@@ -294,6 +307,7 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			rec.BytesInTotal, rec.BytesOutTotal = st.BytesIn, st.BytesOut
 			rec.RateInBps, rec.RateOutBps = st.RateInBps, st.RateOutBps
 			rec.LastSeen = st.LastSeen
+			rec.Hostname = st.Hostname
 		}
 
 		records[key] = rec
@@ -330,6 +344,7 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			RateInBps:     st.RateInBps,
 			RateOutBps:    st.RateOutBps,
 			LastSeen:      st.LastSeen,
+			Hostname:      st.Hostname,
 		}
 	}
 

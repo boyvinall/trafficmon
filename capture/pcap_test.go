@@ -1,14 +1,39 @@
 package capture
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+
+	"github.com/boyvinall/trafficmon/dpi"
 )
+
+// fakeInspector is a dpi.Inspector test double: it always accepts candidates
+// and returns a fixed hostname (or none), while counting how many times
+// Inspect was actually called.
+type fakeInspector struct {
+	hostname string
+	ok       bool
+	calls    int
+}
+
+func (f *fakeInspector) Name() string { return "fake" }
+
+func (f *fakeInspector) Candidate(dpi.CandidatePacket) bool { return true }
+
+func (f *fakeInspector) Inspect([]byte, layers.LinkType) (string, bool) {
+	f.calls++
+	return f.hostname, f.ok
+}
 
 func TestCapturerRecordAndSnapshot(t *testing.T) {
 	c := New(DefaultConfig())
@@ -63,6 +88,160 @@ func TestCapturerRecordReusesCounterPerFlow(t *testing.T) {
 	}
 	if len(c.flows) != 1 {
 		t.Fatalf("flow map has %d entries, want 1", len(c.flows))
+	}
+}
+
+func TestCapturerInspectSetsHostnameAndCachesByIP(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	key := FlowKey{
+		LocalAddr:  mustAddr(t, "192.168.1.10"),
+		LocalPort:  51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"),
+		RemotePort: 443,
+		Proto:      ProtoTCP,
+	}
+	ctr := c.record(key, now, 1000, false)
+
+	insp := &fakeInspector{hostname: "example.com", ok: true}
+	c.cfg.Inspectors = []dpi.Inspector{insp}
+
+	info := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443}
+	c.inspect([]byte("clienthello"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if got := ctr.Hostname(); got != "example.com" {
+		t.Fatalf("ByteCounter.Hostname() = %q, want %q", got, "example.com")
+	}
+	if got, ok := c.hostnameCache.Get(key.RemoteAddr.String(), now); !ok || got != "example.com" {
+		t.Fatalf("HostnameCache Get() = %q, %v; want %q, true", got, ok, "example.com")
+	}
+
+	// A second packet on the same flow must not re-invoke the inspector: the
+	// hostname is already known.
+	c.inspect([]byte("more data"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	if insp.calls != 1 {
+		t.Errorf("Inspect() called %d times, want 1", insp.calls)
+	}
+}
+
+// tlsClientHelloRecord hand-encodes a minimal TLS 1.2 ClientHello record
+// carrying a single server_name (SNI) extension, following the same
+// approach as dpi/tls_test.go's buildClientHello.
+func tlsClientHelloRecord(sni string) []byte {
+	u16 := func(v uint16) []byte { b := make([]byte, 2); binary.BigEndian.PutUint16(b, v); return b }
+
+	nameEntry := append([]byte{0x00}, u16(uint16(len(sni)))...)
+	nameEntry = append(nameEntry, sni...)
+	serverNameList := append(u16(uint16(len(nameEntry))), nameEntry...)
+	extensions := append([]byte{0x00, 0x00}, u16(uint16(len(serverNameList)))...)
+	extensions = append(extensions, serverNameList...)
+
+	// A padding extension (RFC 7685, type 21), sized so the whole datagram
+	// clears minClientHelloDatagramLen regardless of how long sni is — real
+	// ClientHellos are always this size or bigger once their real cipher
+	// suite list and extension set are counted.
+	const paddingLen = 200
+	padding := append([]byte{0x00, 0x15}, u16(paddingLen)...)
+	padding = append(padding, make([]byte, paddingLen)...)
+	extensions = append(extensions, padding...)
+
+	body := []byte{0x03, 0x03}
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0x00)
+	body = append(body, u16(2)...)
+	body = append(body, 0x13, 0x01)
+	body = append(body, 0x01, 0x00)
+	body = append(body, u16(uint16(len(extensions)))...)
+	body = append(body, extensions...)
+
+	bodyLen := len(body)
+	handshake := append([]byte{0x01, byte(bodyLen >> 16), byte(bodyLen >> 8), byte(bodyLen)}, body...)
+
+	record := []byte{0x16, 0x03, 0x01}
+	record = append(record, u16(uint16(len(handshake)))...)
+	return append(record, handshake...)
+}
+
+// TestCapturerInspectSkipsHeaderOnlySegments is the regression test for the
+// bug where Candidate gated on the captured frame's length: a bare SYN, even
+// with a full set of TCP options, is under 120 bytes of real datagram, but a
+// gate based on captured/frame length alone (rather than the datagram's own
+// reported size) let it through anyway — permanently consuming the flow's
+// one inspection attempt (see ByteCounter.NeedsHostnameInspection) before
+// the actual ClientHello ever arrived.
+func TestCapturerInspectSkipsHeaderOnlySegments(t *testing.T) {
+	c := New(DefaultConfig())
+	c.cfg.Inspectors = dpi.DefaultInspectors()
+	now := time.Now()
+
+	key := FlowKey{
+		LocalAddr:  mustAddr(t, "192.168.1.10"),
+		LocalPort:  51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"),
+		RemotePort: 443,
+		Proto:      ProtoTCP,
+	}
+	ctr := c.record(key, now, 0, false)
+
+	syn := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 443, SYN: true, DataOffset: 15, Options: []layers.TCPOption{{
+			OptionType: layers.TCPOptionKindTimestamps, OptionLength: 34,
+			OptionData: bytes.Repeat([]byte{1}, 32),
+		}}})
+	synInfo := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443, Bytes: uint64(len(syn) - 14)}
+	c.inspect(syn, synInfo, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if !ctr.NeedsHostnameInspection() {
+		t.Fatal("a header-only SYN consumed the flow's one inspection attempt")
+	}
+
+	full := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 443, PSH: true, ACK: true},
+		gopacket.Payload(tlsClientHelloRecord("example.com")))
+	fullInfo := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443, Bytes: uint64(len(full) - 14)}
+	c.inspect(full, fullInfo, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if got := ctr.Hostname(); got != "example.com" {
+		t.Fatalf("Hostname() = %q, want %q: the ClientHello following the SYN should still get inspected", got, "example.com")
+	}
+}
+
+func TestCapturerInspectStopsRetryingAfterAMiss(t *testing.T) {
+	c := New(DefaultConfig())
+	now := time.Now()
+
+	key := FlowKey{RemoteAddr: mustAddr(t, "140.82.112.3"), RemotePort: 443, Proto: ProtoTCP}
+	ctr := c.record(key, now, 1000, false)
+
+	insp := &fakeInspector{ok: false}
+	c.cfg.Inspectors = []dpi.Inspector{insp}
+
+	info := packetInfo{Proto: ProtoTCP, DstPort: 443}
+	c.inspect([]byte("not tls"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	c.inspect([]byte("still not tls"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if insp.calls != 1 {
+		t.Errorf("Inspect() called %d times after a miss, want 1", insp.calls)
+	}
+	if ctr.Hostname() != "" {
+		t.Errorf("ByteCounter.Hostname() = %q, want empty", ctr.Hostname())
+	}
+}
+
+func TestCapturerInspectNilInspectorsIsNoop(t *testing.T) {
+	c := New(DefaultConfig())
+	c.cfg.Inspectors = nil
+	now := time.Now()
+
+	key := FlowKey{RemoteAddr: mustAddr(t, "140.82.112.3"), RemotePort: 443, Proto: ProtoTCP}
+	ctr := c.record(key, now, 1000, false)
+
+	info := packetInfo{Proto: ProtoTCP, DstPort: 443}
+	c.inspect([]byte("clienthello"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if ctr.Hostname() != "" {
+		t.Errorf("ByteCounter.Hostname() = %q, want empty with no inspectors configured", ctr.Hostname())
 	}
 }
 

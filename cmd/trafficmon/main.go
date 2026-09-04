@@ -107,7 +107,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	g.Go(func() error { return poller.Run(ctx) })
 	g.Go(func() error {
 		defer stop()
-		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, iface), tea.WithAltScreen(), tea.WithContext(ctx))
+		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), iface), tea.WithAltScreen(), tea.WithContext(ctx))
 		_, err := p.Run()
 		return err
 	})
