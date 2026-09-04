@@ -15,9 +15,6 @@ type KeyMap struct {
 	PageDown key.Binding
 	Home     key.Binding
 	End      key.Binding
-	Mode     key.Binding
-	Enter    key.Binding
-	Back     key.Binding
 	Grouping key.Binding
 	Sort     key.Binding
 	RateSort key.Binding
@@ -28,11 +25,6 @@ type KeyMap struct {
 }
 
 // DefaultKeyMap returns the standard bindings.
-//
-// The vim-style pair for jumping to the ends of the table is only half
-// present: `G` goes to the bottom, but `gg` cannot go to the top because the
-// plan gives `g` to the destination grouping toggle, so home/end carry that
-// half on their own.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Up:       key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
@@ -41,10 +33,7 @@ func DefaultKeyMap() KeyMap {
 		PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+f"), key.WithHelp("pgdn", "page down")),
 		Home:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
 		End:      key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("end/G", "bottom")),
-		Mode:     key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "process/destination")),
-		Enter:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "drill in")),
-		Back:     key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
-		Grouping: key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "ip / ip:port")),
+		Grouping: key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "cycle grouping")),
 		Sort:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "cycle sort")),
 		RateSort: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rate/total")),
 		Filter:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
@@ -56,7 +45,7 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp implements help.KeyMap.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Mode, k.Enter, k.Sort, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Grouping, k.Sort, k.Help, k.Quit}
 }
 
 // FullHelp implements help.KeyMap. Each inner slice is one column of the `?`
@@ -69,7 +58,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.Enter, k.Back, k.Mode, k.Grouping, k.Sort, k.RateSort},
-		{k.Filter, k.Pause, k.Help, k.Quit},
+		{k.Grouping, k.Sort, k.RateSort, k.Filter},
+		{k.Pause, k.Help, k.Quit},
 	}
 }

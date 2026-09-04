@@ -35,8 +35,17 @@ type packetInfo struct {
 	// undercount badly. It also excludes link-layer framing, so the same
 	// connection totals the same whether it was seen over Ethernet or over
 	// the loopback pseudo-header.
+	//
+	// ARP has no length field of its own to read here, so it uses
+	// arpFrameBytes instead — see the ARP case in decode.
 	Bytes uint64
 }
+
+// arpFrameBytes is the fixed size of a standard Ethernet/IPv4 ARP packet: an
+// 8-byte header plus two (6-byte MAC + 4-byte IP) address pairs. It stands in
+// for packetInfo.Bytes, which ARP has no length field to supply, and is safe
+// at any realistic SnapLen since the whole frame is smaller than the default.
+const arpFrameBytes = 28
 
 // transportPorts is a minimal DecodingLayer for TCP and UDP that reads the
 // source and destination ports and stops.
@@ -85,6 +94,9 @@ type flowDecoder struct {
 	ip4   layers.IPv4
 	ip6   layers.IPv6
 	ports transportPorts
+	icmp4 layers.ICMPv4
+	icmp6 layers.ICMPv6
+	arp   layers.ARP
 
 	parser  *gopacket.DecodingLayerParser
 	decoded []gopacket.LayerType
@@ -110,17 +122,17 @@ func newFlowDecoder(linkType layers.LinkType) (*flowDecoder, error) {
 
 	d := &flowDecoder{decoded: make([]gopacket.LayerType, 0, 4)}
 	d.parser = gopacket.NewDecodingLayerParser(first,
-		&d.eth, &d.loop, &d.dot1q, &d.ip4, &d.ip6, &d.ports)
-	// Anything with no decoder here — ICMP, ESP, an exotic IPv6 extension
-	// header — is not a flow we count, so stopping quietly beats erroring.
+		&d.eth, &d.loop, &d.dot1q, &d.ip4, &d.ip6, &d.ports, &d.icmp4, &d.icmp6, &d.arp)
+	// Anything with no decoder here — ESP, an exotic IPv6 extension header —
+	// is not a flow we count, so stopping quietly beats erroring.
 	d.parser.IgnoreUnsupported = true
 
 	return d, nil
 }
 
 // decode extracts the 5-tuple and datagram size from one captured packet. It
-// reports false for anything that is not a complete-enough IP/TCP or IP/UDP
-// packet, which the caller should simply skip.
+// reports false for anything that is not a complete-enough TCP, UDP, ICMP or
+// ARP packet, which the caller should simply skip.
 func (d *flowDecoder) decode(data []byte) (packetInfo, bool) {
 	if err := d.parser.DecodeLayers(data, &d.decoded); err != nil {
 		return packetInfo{}, false
@@ -159,6 +171,26 @@ func (d *flowDecoder) decode(data []byte) (packetInfo, bool) {
 
 		case layers.LayerTypeUDP:
 			info.Proto = ProtoUDP
+			haveTransport = true
+
+		case layers.LayerTypeICMPv4, layers.LayerTypeICMPv6:
+			// Ports stay zero: ICMP has none. haveNet is already set by the
+			// IPv4/IPv6 case that necessarily preceded this one.
+			info.Proto = ProtoICMP
+			haveTransport = true
+
+		case layers.LayerTypeARP:
+			// ARP has no IP layer to supply Src/Dst/Bytes, so this case
+			// stands in for both halves at once.
+			src, okSrc := netip.AddrFromSlice(d.arp.SourceProtAddress)
+			dst, okDst := netip.AddrFromSlice(d.arp.DstProtAddress)
+			if !okSrc || !okDst {
+				return packetInfo{}, false
+			}
+			info.Src, info.Dst = src.Unmap(), dst.Unmap()
+			info.Proto = ProtoARP
+			info.Bytes = arpFrameBytes
+			haveNet = true
 			haveTransport = true
 		}
 	}

@@ -149,6 +149,50 @@ func TestFlowDecoderDecode(t *testing.T) {
 				Bytes: 20 + 20 + 100,
 			},
 		},
+		{
+			name:     "ethernet ipv4 icmp",
+			linkType: layers.LinkTypeEthernet,
+			data: serialize(t,
+				ethernet(layers.EthernetTypeIPv4),
+				ipv4(layers.IPProtocolICMPv4),
+				&layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(8, 0)}, payload),
+			want: packetInfo{
+				Src: mustAddr(t, "192.168.1.10"), Dst: mustAddr(t, "140.82.112.3"),
+				Proto: ProtoICMP,
+				// 20 byte IPv4 header + 8 byte ICMPv4 header + payload.
+				Bytes: 20 + 8 + 100,
+			},
+		},
+		{
+			name:     "ethernet ipv6 icmp",
+			linkType: layers.LinkTypeEthernet,
+			data: serialize(t,
+				ethernet(layers.EthernetTypeIPv6),
+				ipv6(layers.IPProtocolICMPv6),
+				&layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(128, 0)}, payload),
+			want: packetInfo{
+				Src: mustAddr(t, "2001:db8::1"), Dst: mustAddr(t, "2606:4700::1111"),
+				Proto: ProtoICMP,
+				Bytes: 40 + 4 + 100,
+			},
+		},
+		{
+			name:     "ethernet arp",
+			linkType: layers.LinkTypeEthernet,
+			data: serialize(t,
+				ethernet(layers.EthernetTypeARP),
+				&layers.ARP{
+					AddrType: layers.LinkTypeEthernet, Protocol: layers.EthernetTypeIPv4,
+					HwAddressSize: 6, ProtAddressSize: 4, Operation: 1,
+					SourceHwAddress: []byte{2, 0, 0, 0, 0, 1}, SourceProtAddress: []byte{192, 168, 1, 10},
+					DstHwAddress: []byte{0, 0, 0, 0, 0, 0}, DstProtAddress: []byte{192, 168, 1, 1},
+				}),
+			want: packetInfo{
+				Src: mustAddr(t, "192.168.1.10"), Dst: mustAddr(t, "192.168.1.1"),
+				Proto: ProtoARP,
+				Bytes: arpFrameBytes,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -174,24 +218,6 @@ func TestFlowDecoderSkipsUnattributablePackets(t *testing.T) {
 		name string
 		data []byte
 	}{
-		{
-			name: "icmp has no ports",
-			data: serialize(t,
-				ethernet(layers.EthernetTypeIPv4),
-				ipv4(layers.IPProtocolICMPv4),
-				&layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(8, 0)}),
-		},
-		{
-			name: "arp is not ip",
-			data: serialize(t,
-				ethernet(layers.EthernetTypeARP),
-				&layers.ARP{
-					AddrType: layers.LinkTypeEthernet, Protocol: layers.EthernetTypeIPv4,
-					HwAddressSize: 6, ProtAddressSize: 4, Operation: 1,
-					SourceHwAddress: []byte{2, 0, 0, 0, 0, 1}, SourceProtAddress: []byte{192, 168, 1, 10},
-					DstHwAddress: []byte{0, 0, 0, 0, 0, 0}, DstProtAddress: []byte{192, 168, 1, 1},
-				}),
-		},
 		{
 			name: "truncated before the ports",
 			data: serialize(t,

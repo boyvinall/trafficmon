@@ -310,6 +310,36 @@ func TestProtoName(t *testing.T) {
 	}
 }
 
+// TestTCPStateName covers every TSI_S_* state SocketsForPID can hand it, plus
+// the -1 sentinel mn_read_sock_addrs uses for a socket with no state (UDP)
+// and an unrecognised value, both of which fall back to "" rather than a
+// bare kernel constant nobody would recognise.
+func TestTCPStateName(t *testing.T) {
+	tests := []struct {
+		state int
+		want  string
+	}{
+		{tsiClosed, "CLOSED"},
+		{tsiListen, "LISTEN"},
+		{tsiSynSent, "SYN_SENT"},
+		{tsiSynReceived, "SYN_RCVD"},
+		{tsiEstablished, "ESTABLISHED"},
+		{tsiCloseWait, "CLOSE_WAIT"},
+		{tsiFinWait1, "FIN_WAIT_1"},
+		{tsiClosing, "CLOSING"},
+		{tsiLastAck, "LAST_ACK"},
+		{tsiFinWait2, "FIN_WAIT_2"},
+		{tsiTimeWait, "TIME_WAIT"},
+		{-1, ""},
+		{99, ""},
+	}
+	for _, tc := range tests {
+		if got := tcpStateName(tc.state); got != tc.want {
+			t.Errorf("tcpStateName(%d) = %q, want %q", tc.state, got, tc.want)
+		}
+	}
+}
+
 // TestCgoErr checks both of cgoErr's cases: a nil errno gets replaced with a
 // placeholder rather than passed through, and a real error is returned
 // unchanged.

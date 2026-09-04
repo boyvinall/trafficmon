@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,16 +114,20 @@ const (
 // Column drop priorities, lowest dropped first when the terminal is too narrow
 // to show everything.
 //
-// prioEssential marks a column that is never dropped. The label and all four
-// rate/total columns are essential: the plan is explicit that live rate and
-// cumulative total are shown side by side at all times rather than toggled
-// between, so neither half may be traded away for width.
+// prioEssential marks a column that is never dropped. The label, LOCAL,
+// REMOTE and all four rate/total columns are essential: they are the row's
+// identity and the plan is explicit that live rate and cumulative total are
+// shown side by side at all times rather than toggled between, so none of
+// them may be traded away for width.
 //
 // The hostname goes first of all, because it is the only column that annotates
 // another one rather than carrying anything of its own: the address it names
-// is still on screen without it.
+// is still on screen without it. STATE goes next, then PROTO, then CONN,
+// then PID.
 const (
 	prioHostname = iota
+	prioState
+	prioProto
 	prioConnections
 	prioPID
 	prioEssential
@@ -138,6 +143,15 @@ const (
 	totalWidth    = 9
 	pidWidth      = 6
 	connWidth     = 5
+	// stateWidth fits "ESTABLISHED", the longest name tcpStateName returns.
+	stateWidth = 11
+	// protoWidth fits "ICMP", the longest label protoLabel returns.
+	protoWidth = 4
+
+	// dnsPort is the well-known port DNS runs over. It is not a wire
+	// protocol of its own — procinfo and capture both only ever know this
+	// traffic as tcp/udp — so protoLabel recognises it by port instead.
+	dnsPort = 53
 
 	// defaultWidth stands in for the terminal width until the first
 	// tea.WindowSizeMsg arrives, so the very first frame is not rendered at
@@ -196,13 +210,14 @@ type column struct {
 	truncLeft bool
 }
 
-// tableColumns returns the column set for a view, in display order and before
-// any narrow-terminal trimming.
+// tableColumns returns the column set for a grouping, in display order and
+// before any narrow-terminal trimming.
 //
-// hostname supplies the reverse-resolved name annotating a by-destination row;
-// it returns the bare address until one is known, and may be nil in a view
-// with no destinations to name.
-func tableColumns(mode Mode, g aggregate.Grouping, hostname func(aggregate.Row) string) []column {
+// hostname supplies the reverse-resolved name annotating a row's remote
+// address; it returns the bare address until one is known. Every grouping
+// rolls up per remote endpoint, so a row always has one to name; hostname is
+// nil only in tests that don't care about the HOSTNAME column.
+func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string) []column {
 	cols := []column{{
 		title: "PROCESS",
 		align: alignLeft,
@@ -211,37 +226,62 @@ func tableColumns(mode Mode, g aggregate.Grouping, hostname func(aggregate.Row) 
 		cell:  func(r aggregate.Row) string { return r.Label },
 	}}
 
-	switch mode {
-	case ModeProcess:
-		// The PID only means anything in the by-process rollup; ByDestination
-		// leaves it zero, so showing it there would be actively misleading.
-		cols = append(cols, column{
-			title:     "PID",
-			width:     pidWidth,
-			align:     alignRight,
-			prio:      prioPID,
-			cell:      func(r aggregate.Row) string { return strconv.Itoa(int(r.PID)) },
-			truncLeft: true,
-		})
-	case ModeDestination:
-		cols[labelColumn].title = "HOST"
-		if g == aggregate.GroupByIPPort {
-			cols[labelColumn].title = "HOST:PORT"
+	switch g {
+	case aggregate.GroupByPID:
+		// A row is exactly one process instance talking to exactly one
+		// remote endpoint here, so LOCAL, REMOTE and PID all still mean
+		// something; STATE does not, since the row can roll up more than one
+		// connection to that endpoint.
+		cols = append(cols,
+			localColumn(func(r aggregate.Row) string { return r.LocalAddr }),
+			remoteColumn(),
+		)
+		if hostname != nil {
+			cols = append(cols, hostnameColumn(hostname))
 		}
+		cols = append(cols, pidColumn(), connColumn())
+	case aggregate.GroupByProcessName:
+		// A process name can span several PIDs and local addresses, so
+		// nothing but the label, the remote endpoint and the connection
+		// count has one answer.
+		cols = append(cols, remoteColumn())
+		if hostname != nil {
+			cols = append(cols, hostnameColumn(hostname))
+		}
+		cols = append(cols, connColumn())
+	default: // aggregate.GroupNone
+		cols = append(cols,
+			localColumn(func(r aggregate.Row) string {
+				return net.JoinHostPort(r.LocalAddr, strconv.Itoa(int(r.LocalPort)))
+			}),
+			remoteColumn(),
+		)
 
 		// The hostname sits immediately beside the address it names, and
 		// shares the flexible width with it rather than taking a fixed slice:
 		// neither an address nor a fully qualified name has a length worth
 		// baking into a constant, and on a wide terminal both should grow.
 		if hostname != nil {
-			cols = append(cols, column{
-				title: "HOSTNAME",
-				align: alignLeft,
-				prio:  prioHostname,
-				flex:  true,
-				cell:  hostname,
-			})
+			cols = append(cols, hostnameColumn(hostname))
 		}
+
+		cols = append(cols,
+			column{
+				title: "PROTO",
+				width: protoWidth,
+				align: alignLeft,
+				prio:  prioProto,
+				cell:  protoLabel,
+			},
+			pidColumn(),
+			column{
+				title: "STATE",
+				width: stateWidth,
+				align: alignLeft,
+				prio:  prioState,
+				cell:  func(r aggregate.Row) string { return r.State },
+			},
+		)
 	}
 
 	return append(cols,
@@ -281,17 +321,89 @@ func tableColumns(mode Mode, g aggregate.Grouping, hostname func(aggregate.Row) 
 			sortable: true,
 			sortKey:  SortTotal,
 		},
-		column{
-			title:     "CONN",
-			width:     connWidth,
-			align:     alignRight,
-			prio:      prioConnections,
-			cell:      func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
-			sortable:  true,
-			sortKey:   SortConnections,
-			truncLeft: true,
-		},
 	)
+}
+
+// localColumn builds the LOCAL column. cell differs by grouping: ungrouped it
+// renders the full local addr:port, grouped by PID it renders the bare
+// address (see aggregate.Row.LocalAddr's doc for why a grouped row only ever
+// has one representative address to show). It is flexible, like REMOTE and
+// PROCESS: an address has no length worth baking into a constant, and an
+// IPv6 one truncated to a fixed width would be unreadable rather than merely
+// short.
+func localColumn(cell func(aggregate.Row) string) column {
+	return column{title: "LOCAL", align: alignLeft, prio: prioEssential, flex: true, cell: cell}
+}
+
+// remoteColumn builds the REMOTE column, shared by every grouping: even
+// GroupByPID and GroupByProcessName roll up per remote endpoint, so a row
+// always has exactly one to show.
+func remoteColumn() column {
+	return column{
+		title: "REMOTE",
+		align: alignLeft,
+		prio:  prioEssential,
+		flex:  true,
+		cell: func(r aggregate.Row) string {
+			return net.JoinHostPort(r.RemoteAddr, strconv.Itoa(int(r.RemotePort)))
+		},
+	}
+}
+
+// hostnameColumn builds the HOSTNAME column, annotating whichever REMOTE
+// column is in play. It sits immediately beside the address it names, and
+// shares the flexible width with it rather than taking a fixed slice: neither
+// an address nor a fully qualified name has a length worth baking into a
+// constant, and on a wide terminal both should grow.
+func hostnameColumn(hostname func(aggregate.Row) string) column {
+	return column{title: "HOSTNAME", align: alignLeft, prio: prioHostname, flex: true, cell: hostname}
+}
+
+// pidColumn builds the PID column, shared by the ungrouped and by-PID views —
+// the only two where a row names exactly one process instance.
+func pidColumn() column {
+	return column{
+		title: "PID",
+		width: pidWidth,
+		align: alignRight,
+		prio:  prioPID,
+		cell: func(r aggregate.Row) string {
+			// PID 0 never occurs for a real socket; it marks a row synthesised
+			// for a protocol with no owning process (ICMP, ARP).
+			if r.PID == 0 {
+				return "-"
+			}
+			return strconv.Itoa(int(r.PID))
+		},
+		truncLeft: true,
+	}
+}
+
+// protoLabel returns the PROTO column's text for r: the transport protocol
+// name, uppercased, or DNS when the traffic is UDP/TCP on the well-known DNS
+// port — DNS is not a wire protocol of its own, so it is recognised by port
+// rather than by r.Proto.
+func protoLabel(r aggregate.Row) string {
+	if (r.Proto == "tcp" || r.Proto == "udp") && (r.LocalPort == dnsPort || r.RemotePort == dnsPort) {
+		return "DNS"
+	}
+	return strings.ToUpper(r.Proto)
+}
+
+// connColumn builds the CONN column, shown only once a grouping can roll more
+// than one connection into a row — ungrouped, Connections is always 1 and the
+// column would say nothing.
+func connColumn() column {
+	return column{
+		title:     "CONN",
+		width:     connWidth,
+		align:     alignRight,
+		prio:      prioConnections,
+		cell:      func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
+		sortable:  true,
+		sortKey:   SortConnections,
+		truncLeft: true,
+	}
 }
 
 // fitColumns trims cols to a terminal width and sizes the flexible columns

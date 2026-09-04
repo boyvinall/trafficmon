@@ -98,20 +98,22 @@ func processRows() []aggregate.Row {
 	}
 }
 
-// destinationRows is the by-destination fixture, including a bracketed IPv6
-// address that is long enough to exercise the label column.
+// destinationRows is the ungrouped fixture, including a bracketed IPv6
+// remote address that is long enough to exercise the label column.
 func destinationRows() []aggregate.Row {
 	return []aggregate.Row{
 		{
-			Key: "140.82.112.3:443", Label: "140.82.112.3:443",
-			RemoteAddr: "140.82.112.3", RemotePort: 443,
+			Key: "412|192.168.1.10|51000|140.82.112.3|443|tcp", Label: "com.apple.WebKit.Networking", PID: 412,
+			LocalAddr: "192.168.1.10", LocalPort: 51000,
+			RemoteAddr: "140.82.112.3", RemotePort: 443, Proto: "tcp", State: "ESTABLISHED",
 			RateInBps: 2202009, RateOutBps: 184320,
 			BytesInTotal: 134217728, BytesOutTotal: 12582912,
-			Connections: 4, LastSeen: testNow,
+			Connections: 1, LastSeen: testNow,
 		},
 		{
-			Key: "[2606:4700:4700::1111]:53", Label: "[2606:4700:4700::1111]:53",
-			RemoteAddr: "2606:4700:4700::1111", RemotePort: 53,
+			Key: "22|192.168.1.10|51001|2606:4700:4700::1111|53|udp", Label: "sshd", PID: 22,
+			LocalAddr: "192.168.1.10", LocalPort: 51001,
+			RemoteAddr: "2606:4700:4700::1111", RemotePort: 53, Proto: "udp",
 			RateInBps: 900, BytesInTotal: 90000,
 			Connections: 1, LastSeen: testNow,
 		},
@@ -146,8 +148,7 @@ func newResolvedModel(t *testing.T, names map[string]string, width, height int) 
 	t.Helper()
 
 	m := newTestModel(destinationRows(), width, height)
-	m.stack.SetMode(ModeDestination)
-	m.grouping = aggregate.GroupByIPPort
+	m.grouping = aggregate.GroupNone
 	m.resolver = dns.NewResolverWith(func(_ context.Context, addr string) ([]string, error) {
 		if name, ok := names[addr]; ok {
 			return []string{name + "."}, nil

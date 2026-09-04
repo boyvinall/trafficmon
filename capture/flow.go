@@ -10,10 +10,16 @@ import (
 // Proto is the transport protocol of a flow.
 type Proto uint8
 
-// Supported transport protocols.
+// Supported protocols.
 const (
 	ProtoTCP Proto = iota
 	ProtoUDP
+	// ProtoICMP covers both ICMPv4 and ICMPv6: neither carries a socket, so
+	// there is no attribution for a Proto of its own to distinguish.
+	ProtoICMP
+	// ProtoARP has no IP layer at all — its addresses come straight out of
+	// the ARP payload (see flowDecoder.decode).
+	ProtoARP
 )
 
 // String returns the lowercase name of p, or "?" for an unrecognised value.
@@ -23,6 +29,10 @@ func (p Proto) String() string {
 		return "tcp"
 	case ProtoUDP:
 		return "udp"
+	case ProtoICMP:
+		return "icmp"
+	case ProtoARP:
+		return "arp"
 	default:
 		return "?"
 	}

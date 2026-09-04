@@ -91,6 +91,7 @@ typedef struct {
 	int      kind;     // SOCKINFO_TCP or SOCKINFO_IN
 	int      protocol; // IPPROTO_TCP, IPPROTO_UDP, ...
 	int      is_v6;    // non-zero when laddr/faddr hold 16 address bytes
+	int      state;    // TCP state (TSI_S_*), or -1 for a socket with none
 	uint16_t lport;    // host byte order
 	uint16_t fport;    // host byte order
 	uint8_t  laddr[16];
@@ -117,6 +118,11 @@ static int mn_read_sock_addrs(const struct socket_fdinfo *fdi, mn_sock_addrs *ou
 	memset(out, 0, sizeof(*out));
 	out->kind = fdi->psi.soi_kind;
 	out->protocol = fdi->psi.soi_protocol;
+
+	out->state = -1;
+	if (fdi->psi.soi_kind == SOCKINFO_TCP) {
+		out->state = fdi->psi.soi_proto.pri_tcp.tcpsi_state;
+	}
 
 	// insi_lport/insi_fport are declared int but hold a 16-bit port in network
 	// byte order in their low half.
@@ -235,6 +241,10 @@ type Socket struct {
 	LocalAddr  netip.Addr
 	RemoteAddr netip.Addr
 	Proto      string // "tcp" or "udp"
+	// State is the TCP connection's kernel state (e.g. "ESTABLISHED",
+	// "TIME_WAIT"), or "" for UDP and any other protocol with no state
+	// concept.
+	State string
 }
 
 // SocketsForPID walks pid's file descriptors and returns every TCP or UDP
@@ -288,6 +298,7 @@ func SocketsForPID(pid int32) ([]Socket, error) {
 			LocalAddr:  sockAddr(addrs.laddr, addrs.is_v6 != 0),
 			RemoteAddr: sockAddr(addrs.faddr, addrs.is_v6 != 0),
 			Proto:      proto,
+			State:      tcpStateName(int(addrs.state)),
 		})
 	}
 
@@ -331,6 +342,57 @@ const (
 	ipprotoTCP  = int(C.IPPROTO_TCP)
 	ipprotoUDP  = int(C.IPPROTO_UDP)
 )
+
+// TCP kernel states (TSI_S_*, from struct tcp_sockinfo's tcpsi_state),
+// mirrored as plain Go ints for the same reason as the constants above:
+// tcpStateName, and tests exercising it directly, need no "C" import of
+// their own.
+const (
+	tsiClosed      = int(C.TSI_S_CLOSED)
+	tsiListen      = int(C.TSI_S_LISTEN)
+	tsiSynSent     = int(C.TSI_S_SYN_SENT)
+	tsiSynReceived = int(C.TSI_S_SYN_RECEIVED)
+	tsiEstablished = int(C.TSI_S_ESTABLISHED)
+	tsiCloseWait   = int(C.TSI_S__CLOSE_WAIT)
+	tsiFinWait1    = int(C.TSI_S_FIN_WAIT_1)
+	tsiClosing     = int(C.TSI_S_CLOSING)
+	tsiLastAck     = int(C.TSI_S_LAST_ACK)
+	tsiFinWait2    = int(C.TSI_S_FIN_WAIT_2)
+	tsiTimeWait    = int(C.TSI_S_TIME_WAIT)
+)
+
+// tcpStateName maps a TCP socket's kernel state to the name netstat/nettop
+// use for it. state is -1 for a socket with no state concept (UDP) and any
+// value this does not recognise falls back to "", the same as no state at
+// all, rather than surfacing a kernel constant nobody would recognise.
+func tcpStateName(state int) string {
+	switch state {
+	case tsiClosed:
+		return "CLOSED"
+	case tsiListen:
+		return "LISTEN"
+	case tsiSynSent:
+		return "SYN_SENT"
+	case tsiSynReceived:
+		return "SYN_RCVD"
+	case tsiEstablished:
+		return "ESTABLISHED"
+	case tsiCloseWait:
+		return "CLOSE_WAIT"
+	case tsiFinWait1:
+		return "FIN_WAIT_1"
+	case tsiClosing:
+		return "CLOSING"
+	case tsiLastAck:
+		return "LAST_ACK"
+	case tsiFinWait2:
+		return "FIN_WAIT_2"
+	case tsiTimeWait:
+		return "TIME_WAIT"
+	default:
+		return ""
+	}
+}
 
 // protoName maps a socket's kind and protocol number onto the names the rest of
 // the program uses, returning "" for socket types we do not track. It takes

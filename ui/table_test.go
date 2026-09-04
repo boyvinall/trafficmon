@@ -19,7 +19,7 @@ func columnTitles(cols []column) []string {
 }
 
 func TestRenderRowsAlign(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
 	want := tableWidth(cols)
 
 	// The header is checked under every sort key, because the marker the
@@ -40,7 +40,7 @@ func TestRenderRowsAlign(t *testing.T) {
 }
 
 func TestRenderRowsColumnOffsetsAreStable(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
 	lines := renderRows(processRows(), cols)
 
 	// The right-hand edge of each column is a fixed offset. Checking that the
@@ -64,7 +64,7 @@ func TestRenderRowsColumnOffsetsAreStable(t *testing.T) {
 }
 
 func TestRenderRowShowsRateAndTotalTogether(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
 	line := renderRow(processRows()[0], cols)
 
 	// The plan is explicit that rate and cumulative total are not a toggle, so
@@ -76,34 +76,93 @@ func TestRenderRowShowsRateAndTotalTogether(t *testing.T) {
 	}
 }
 
-func TestTableColumnsByMode(t *testing.T) {
+func TestTableColumnsByGrouping(t *testing.T) {
 	tests := []struct {
 		name     string
-		mode     Mode
 		grouping aggregate.Grouping
+		hostname func(aggregate.Row) string
 		want     []string
 	}{
 		{
-			name: "process", mode: ModeProcess, grouping: aggregate.GroupByIP,
-			want: []string{"PROCESS", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			name: "ungrouped, no hostname", grouping: aggregate.GroupNone,
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
-			name: "destination by ip", mode: ModeDestination, grouping: aggregate.GroupByIP,
-			want: []string{"HOST", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			name: "ungrouped, with hostname", grouping: aggregate.GroupNone, hostname: stubHostname,
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
-			name: "destination by ip:port", mode: ModeDestination, grouping: aggregate.GroupByIPPort,
-			want: []string{"HOST:PORT", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			name: "by PID", grouping: aggregate.GroupByPID,
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+		},
+		{
+			name: "by PID, with hostname", grouping: aggregate.GroupByPID, hostname: stubHostname,
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+		},
+		{
+			name: "by process name", grouping: aggregate.GroupByProcessName,
+			want: []string{"PROCESS", "REMOTE", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+		},
+		{
+			name: "by process name, with hostname", grouping: aggregate.GroupByProcessName, hostname: stubHostname,
+			want: []string{"PROCESS", "REMOTE", "HOSTNAME", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := columnTitles(tableColumns(tc.mode, tc.grouping, stubHostname))
+			got := columnTitles(tableColumns(tc.grouping, tc.hostname))
 			if strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProtoLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		row  aggregate.Row
+		want string
+	}{
+		{name: "tcp", row: aggregate.Row{Proto: "tcp"}, want: "TCP"},
+		{name: "udp", row: aggregate.Row{Proto: "udp"}, want: "UDP"},
+		{name: "icmp", row: aggregate.Row{Proto: "icmp"}, want: "ICMP"},
+		{name: "arp", row: aggregate.Row{Proto: "arp"}, want: "ARP"},
+		{
+			name: "udp on the dns port shows dns, not udp",
+			row:  aggregate.Row{Proto: "udp", RemotePort: 53},
+			want: "DNS",
+		},
+		{
+			name: "tcp on the local dns port shows dns too",
+			row:  aggregate.Row{Proto: "tcp", LocalPort: 53},
+			want: "DNS",
+		},
+		{
+			name: "icmp on port 53 is not dns -- icmp has no ports",
+			row:  aggregate.Row{Proto: "icmp", LocalPort: 53},
+			want: "ICMP",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := protoLabel(tt.row); got != tt.want {
+				t.Errorf("protoLabel(%+v) = %q, want %q", tt.row, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPIDColumnShowsDashForUnattributedRows(t *testing.T) {
+	col := pidColumn()
+
+	if got := col.cell(aggregate.Row{PID: 0}); got != "-" {
+		t.Errorf("pidColumn cell for PID 0 = %q, want %q", got, "-")
+	}
+	if got := col.cell(aggregate.Row{PID: 1234}); got != "1234" {
+		t.Errorf("pidColumn cell for PID 1234 = %q, want %q", got, "1234")
 	}
 }
 
@@ -112,9 +171,10 @@ func TestPIDAndConnColumnsTruncateFromTheLeft(t *testing.T) {
 	// do (humanRate/humanBytes are provably within their column). This proves
 	// that if either value ever overflows its column anyway, the low-order
 	// digits — the ones that actually distinguish it from a neighbouring
-	// value — are what survive, rather than being the ones dropped.
+	// value — are what survive, rather than being the ones dropped. GroupByPID
+	// is the one grouping where both columns are on screen together.
 	row := aggregate.Row{PID: 2147483647, Connections: 123456}
-	cols := tableColumns(ModeProcess, aggregate.GroupByIP, nil)
+	cols := tableColumns(aggregate.GroupByPID, nil)
 
 	tests := []struct {
 		title string
@@ -150,42 +210,45 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 	}{
 		{
 			name: "roomy", width: 120,
-			want:       []string{"PROCESS", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
-			labelWidth: 57,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 19,
 		},
 		{
-			name: "typical", width: 100,
-			want:       []string{"PROCESS", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
-			labelWidth: 37,
+			name: "typical", width: 97,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 10,
 		},
 		{
-			name: "connections dropped first", width: 70,
-			want:       []string{"PROCESS", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 14,
-		},
-		{
-			name: "pid dropped second", width: 60,
-			want:       []string{"PROCESS", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 12,
+			name: "connections dropped first", width: 90,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 10,
 		},
 		{
 			// Rate and total are never traded away, so below the essential
-			// set the table stops shrinking and the caller clips it.
+			// set the table stops shrinking and the caller clips it. REMOTE
+			// is essential in every grouping now, so PID drops straight to
+			// that floor rather than there being a width where it alone is
+			// gone but the row still fits its own width.
+			name: "pid dropped, at the essential floor", width: 82,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: minLabelWidth,
+		},
+		{
 			name: "essential floor", width: 30,
-			want:       []string{"PROCESS", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: minLabelWidth,
 		},
 		{
 			// An unset width means no tea.WindowSizeMsg has arrived yet.
 			name: "unknown width", width: 0,
-			want:       []string{"PROCESS", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
-			labelWidth: 37,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 11,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), tc.width)
+			cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), tc.width)
 
 			if got := columnTitles(cols); strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)
@@ -196,7 +259,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 
 			// Whatever survives must still fill the terminal exactly, except
 			// at the floor where the minimum is wider than the terminal.
-			if w := tableWidth(cols); tc.width >= 60 && w != tc.width {
+			if w := tableWidth(cols); tc.width >= 82 && w != tc.width {
 				t.Errorf("table width = %d, want %d", w, tc.width)
 			}
 		})
@@ -204,7 +267,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 }
 
 func TestFitColumnsDoesNotMutateInput(t *testing.T) {
-	cols := tableColumns(ModeProcess, aggregate.GroupByIP, nil)
+	cols := tableColumns(aggregate.GroupByPID, nil)
 	before := len(cols)
 
 	fitColumns(cols, 40)
@@ -215,20 +278,20 @@ func TestFitColumnsDoesNotMutateInput(t *testing.T) {
 }
 
 func TestLabelTruncatesAtNarrowWidth(t *testing.T) {
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 60)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 82)
 	line := renderRow(processRows()[0], cols)
 
 	label := string([]rune(line)[:cols[labelColumn].width])
-	if label != "com.apple.W…" {
-		t.Errorf("label = %q, want %q", label, "com.apple.W…")
+	if label != "com.apple…" {
+		t.Errorf("label = %q, want %q", label, "com.apple…")
 	}
 
 	// Truncation, not wrapping: one row is always one line.
 	if strings.Contains(line, "\n") {
 		t.Errorf("row wrapped onto a second line: %q", line)
 	}
-	if got := lipgloss.Width(line); got != 60 {
-		t.Errorf("row width = %d, want 60", got)
+	if got := lipgloss.Width(line); got != 82 {
+		t.Errorf("row width = %d, want 82", got)
 	}
 }
 
@@ -271,8 +334,9 @@ func TestTruncateLeft(t *testing.T) {
 	}{
 		{name: "fits exactly", s: "sshd", w: 4, want: "sshd"},
 		{name: "shorter than cell", s: "sshd", w: 8, want: "sshd"},
-		// The end of the string is the part worth keeping: it is the innermost
-		// scope of a drill path, and the levels above it are one esc away.
+		// The end of the string is the part worth keeping: it is a value's
+		// low-order digits, and the digits that distinguish it from a
+		// neighbour are the ones on the right.
 		{name: "one over", s: "sshd", w: 3, want: "…hd"},
 		{name: "single cell", s: "sshd", w: 1, want: "…"},
 		{name: "no room", s: "sshd", w: 0, want: ""},
@@ -402,7 +466,7 @@ func TestTableHeaderMarksTheSortedColumns(t *testing.T) {
 		{name: "connections", k: SortConnections, marked: []string{"CONN"}},
 	}
 
-	cols := fitColumns(tableColumns(ModeProcess, aggregate.GroupByIP, nil), 100)
+	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil), 100)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,7 +586,7 @@ func TestSortRowsByKeyIsStableOnTies(t *testing.T) {
 	}
 }
 
-func TestFitColumnsDropsTheHostnameFirst(t *testing.T) {
+func TestFitColumnsDropsHostnameThenStateThenPID(t *testing.T) {
 	tests := []struct {
 		name       string
 		width      int
@@ -530,36 +594,46 @@ func TestFitColumnsDropsTheHostnameFirst(t *testing.T) {
 		labelWidth int
 	}{
 		{
-			// The two flexible columns split what the fixed ones leave, so a
-			// wide terminal spends its extra cells on both.
-			name: "roomy", width: 120,
-			want:       []string{"HOST", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
+			// The four flexible columns split what the fixed ones leave, so
+			// a wide terminal spends its extra cells on all of them.
+			name: "roomy", width: 200,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 32,
 		},
 		{
-			name: "typical", width: 100,
-			want:       []string{"HOST", "HOSTNAME", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
-			labelWidth: 22,
+			name: "typical", width: 140,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 17,
 		},
 		{
-			// The hostname goes before the connection count, which outranks
-			// it: the address the hostname annotates is still on screen
-			// without it, whereas nothing else says how many connections a
-			// row stands for.
-			name: "hostname dropped first", width: 76,
-			want:       []string{"HOST", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL", "CONN"},
-			labelWidth: 21,
+			// The hostname goes before everything else, because it is the
+			// only column that annotates another one rather than carrying
+			// anything of its own: the address it names is still on screen
+			// without it.
+			name: "hostname dropped first", width: 110,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 11,
 		},
 		{
-			name: "connections dropped second", width: 64,
-			want:       []string{"HOST", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 16,
+			name: "state dropped second", width: 100,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 12,
+		},
+		{
+			name: "proto dropped third", width: 92,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 12,
+		},
+		{
+			name: "pid dropped fourth", width: 86,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 12,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cols := fitColumns(tableColumns(ModeDestination, aggregate.GroupByIP, stubHostname), tc.width)
+			cols := fitColumns(tableColumns(aggregate.GroupNone, stubHostname), tc.width)
 
 			if got := columnTitles(cols); strings.Join(got, "|") != strings.Join(tc.want, "|") {
 				t.Errorf("columns = %v, want %v", got, tc.want)

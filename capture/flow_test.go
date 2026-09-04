@@ -88,6 +88,8 @@ func TestProtoString(t *testing.T) {
 	}{
 		{name: "tcp", p: ProtoTCP, want: "tcp"},
 		{name: "udp", p: ProtoUDP, want: "udp"},
+		{name: "icmp", p: ProtoICMP, want: "icmp"},
+		{name: "arp", p: ProtoARP, want: "arp"},
 		{name: "unrecognised value", p: Proto(255), want: "?"},
 	}
 

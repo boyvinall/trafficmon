@@ -2,6 +2,8 @@ package procinfo
 
 import (
 	"context"
+	"log/slog"
+	"net/netip"
 	"sync"
 	"time"
 )
@@ -27,11 +29,33 @@ type portKey struct {
 	proto string
 }
 
-// Poller periodically rebuilds the local-port to process mapping.
+// Connection is one open socket, as enumerated directly from the kernel (see
+// SocketsForPID) together with the process that owns it.
+//
+// Unlike the port map Lookup and Snapshot expose, which only says who
+// currently owns a local port, Connections is the full list: it is what lets
+// a row exist in the UI purely because a socket is open, whether or not it
+// has ever carried traffic.
+type Connection struct {
+	PID         int32
+	ProcessName string
+
+	LocalAddr  netip.Addr
+	LocalPort  uint16
+	RemoteAddr netip.Addr
+	RemotePort uint16
+	Proto      string // "tcp" or "udp"
+	// State is the TCP connection's kernel state, or "" for UDP.
+	State string
+}
+
+// Poller periodically rebuilds the local-port to process mapping and the
+// full open-connection list.
 type Poller struct {
 	mu    sync.RWMutex
 	ports map[portKey]Process
 	names map[int32]string // cache: PID to executable name, pruned each poll
+	conns []Connection
 }
 
 // NewPoller returns an idle Poller. Call Run to start polling.
@@ -88,12 +112,21 @@ func (p *Poller) poll() error {
 
 	ports := make(map[portKey]Process, len(pids))
 	names := make(map[int32]string, len(oldNames))
+	var conns []Connection
 
 	for _, pid := range pids {
 		socks, err := SocketsForPID(pid)
 		if err != nil {
 			// Processes come and go mid-walk, and some are simply not
-			// inspectable. Skip rather than abandoning the whole poll.
+			// inspectable -- a hardened-runtime process (many EDR/security
+			// agents, e.g. a System Extension, deliberately block fd
+			// introspection as self-protection) can refuse this even to
+			// root. Skip rather than abandoning the whole poll, but log the
+			// reason at debug level: otherwise a PID that is persistently
+			// unattributable is indistinguishable from one that legitimately
+			// owns no sockets, and every one of its flows silently lands in
+			// UnknownProcess with no way to tell why.
+			slog.Debug("procinfo: pid not inspectable, skipping", "pid", pid, "err", err)
 			continue
 		}
 		if len(socks) == 0 {
@@ -117,12 +150,23 @@ func (p *Poller) poll() error {
 
 		for _, s := range socks {
 			ports[portKey{port: s.LocalPort, proto: s.Proto}] = Process{PID: pid, Name: name}
+			conns = append(conns, Connection{
+				PID:         pid,
+				ProcessName: name,
+				LocalAddr:   s.LocalAddr,
+				LocalPort:   s.LocalPort,
+				RemoteAddr:  s.RemoteAddr,
+				RemotePort:  s.RemotePort,
+				Proto:       s.Proto,
+				State:       s.State,
+			})
 		}
 	}
 
 	p.mu.Lock()
 	p.ports = ports
 	p.names = names
+	p.conns = conns
 	p.mu.Unlock()
 
 	return nil
@@ -149,5 +193,18 @@ func (p *Poller) Snapshot() map[uint16]Process {
 	for k, v := range p.ports {
 		out[k.port] = v
 	}
+	return out
+}
+
+// Connections returns every socket seen in the most recently completed
+// poll, across every process. The aggregator uses this, not Snapshot, to
+// decide which rows exist: a row is present because a socket is open, not
+// because traffic has been captured for it.
+func (p *Poller) Connections() []Connection {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]Connection, len(p.conns))
+	copy(out, p.conns)
 	return out
 }

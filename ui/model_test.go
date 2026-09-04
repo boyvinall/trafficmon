@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -23,18 +22,17 @@ func TestViewHeader(t *testing.T) {
 		omits    []string
 	}{
 		{
-			name:     "top level process view",
+			name:     "ungrouped by default",
 			setup:    func(*Model) {},
-			contains: []string{appName, "By Process", "en0", "live"},
-			omits:    []string{"PAUSED", "›"},
+			contains: []string{appName, "Ungrouped", "en0", "live"},
+			omits:    []string{"PAUSED"},
 		},
 		{
-			name: "destination view names its grouping",
+			name: "grouping names itself",
 			setup: func(m *Model) {
-				m.stack.SetMode(ModeDestination)
-				m.grouping = aggregate.GroupByIPPort
+				m.grouping = aggregate.GroupByProcessName
 			},
-			contains: []string{"By Destination (ip:port)"},
+			contains: []string{"By Process"},
 		},
 		{
 			name: "paused capture is flagged",
@@ -43,26 +41,6 @@ func TestViewHeader(t *testing.T) {
 			},
 			contains: []string{"PAUSED"},
 			omits:    []string{"live"},
-		},
-		{
-			name: "breadcrumb appears once drilled in",
-			setup: func(m *Model) {
-				m.stack.Push(Frame{Mode: ModeDestination, Label: "Process: Chrome (pid 4821)"})
-			},
-			contains: []string{"Process: Chrome (pid 4821)"},
-		},
-		{
-			// A drill path grows a step per level and would otherwise shove
-			// the status off the bar. It is cut from the left instead, so what
-			// survives is the innermost scope — the one the rows on screen are
-			// filtered by — rather than a level the user has drilled past.
-			name: "a deep breadcrumb is cut from the left, not left to overflow",
-			setup: func(m *Model) {
-				m.stack.Push(Frame{Mode: ModeDestination, Label: "Process: Google Chrome Helper (pid 980)"})
-				m.stack.Push(Frame{Mode: ModeProcess, Label: "Destination: 140.82.112.3"})
-			},
-			contains: []string{"…", "Destination: 140.82.112.3", "sort: rate", "live"},
-			omits:    []string{"Process: Google Chrome Helper"},
 		},
 	}
 
@@ -89,36 +67,14 @@ func TestViewHeader(t *testing.T) {
 	}
 }
 
-func TestViewFooterIsContextSensitive(t *testing.T) {
+func TestViewFooterOffersGroupingAndSort(t *testing.T) {
 	m := newTestModel(processRows(), 100, 12)
 
-	top := m.viewFooter()
-	if strings.Contains(top, "back") {
-		t.Errorf("top-level footer %q offers esc, which does nothing at depth 0", top)
-	}
-	for _, want := range []string{"quit", "help", "sort"} {
-		if !strings.Contains(top, want) {
-			t.Errorf("top-level footer %q missing %q", top, want)
+	got := m.viewFooter()
+	for _, want := range []string{"quit", "help", "sort", "grouping"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("footer %q missing %q", got, want)
 		}
-	}
-
-	if !strings.Contains(top, "process/destination") {
-		t.Errorf("top-level footer %q should offer tab", top)
-	}
-
-	m.stack.Push(Frame{Mode: ModeDestination, Label: "Process: Chrome (pid 4821)"})
-	drilled := m.viewFooter()
-	if !strings.Contains(drilled, "back") {
-		t.Errorf("drilled-in footer %q should offer esc", drilled)
-	}
-
-	// Tab only acts at the top level, so below it esc takes its slot rather
-	// than the hint line growing a key that does nothing.
-	if strings.Contains(drilled, "process/destination") {
-		t.Errorf("drilled-in footer %q still offers tab", drilled)
-	}
-	if len(m.footerKeys()) != len(m.keys.ShortHelp()) {
-		t.Errorf("drilled-in footer should swap a hint, not add one")
 	}
 }
 
@@ -142,7 +98,7 @@ func TestViewHelpOverlay(t *testing.T) {
 	}
 
 	// The header and footer stay put, so the overlay never loses the user.
-	if !strings.Contains(got, "By Process") {
+	if !strings.Contains(got, "Ungrouped") {
 		t.Errorf("help overlay dropped the header")
 	}
 }
@@ -163,7 +119,7 @@ func TestViewFitsTerminal(t *testing.T) {
 		// hints can be trimmed to: both have to be clipped by the frame.
 		{name: "very narrow", width: 45, height: 12, rows: processRows()},
 		{name: "absurdly narrow", width: 20, height: 12, rows: processRows()},
-		{name: "destination rows, narrow", width: 45, height: 12, rows: destinationRows()},
+		{name: "ungrouped rows, narrow", width: 45, height: 12, rows: destinationRows()},
 		{name: "empty", width: 100, height: 12, rows: nil},
 		{name: "help overlay", width: 100, height: 12, rows: processRows(), showHelp: true},
 		// The help bubble stops dropping columns before it stops overflowing,
@@ -214,7 +170,12 @@ func TestViewEmptyTable(t *testing.T) {
 func TestClosedRowsRenderDimmed(t *testing.T) {
 	withANSI(t)
 
-	m := newTestModel(processRows(), 100, 12)
+	// processRows is grouped-by-PID-shaped data (PID and Connections, no
+	// local/remote address). GroupByPID now also carries REMOTE and HOSTNAME,
+	// so the terminal has to be wide enough to leave PROCESS the room for
+	// the full label to survive untruncated.
+	m := newTestModel(processRows(), 150, 12)
+	m.grouping = aggregate.GroupByPID
 
 	// Keep the cursor off both rows under test: the selected style would
 	// otherwise mask the difference this test is looking for.
@@ -350,28 +311,6 @@ func TestViewScrollsToKeepCursorVisible(t *testing.T) {
 	}
 }
 
-func TestModeLabel(t *testing.T) {
-	tests := []struct {
-		name     string
-		mode     Mode
-		grouping aggregate.Grouping
-		want     string
-	}{
-		{name: "process", mode: ModeProcess, grouping: aggregate.GroupByIP, want: "By Process"},
-		{name: "process ignores grouping", mode: ModeProcess, grouping: aggregate.GroupByIPPort, want: "By Process"},
-		{name: "destination by ip", mode: ModeDestination, grouping: aggregate.GroupByIP, want: "By Destination (ip)"},
-		{name: "destination by ip:port", mode: ModeDestination, grouping: aggregate.GroupByIPPort, want: "By Destination (ip:port)"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := modeLabel(tc.mode, tc.grouping); got != tc.want {
-				t.Errorf("modeLabel = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestJoinEnds(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -394,28 +333,27 @@ func TestJoinEnds(t *testing.T) {
 	}
 }
 
-func TestViewDestinationMode(t *testing.T) {
-	// Wide enough that the address column does not have to truncate: it now
-	// shares the flexible width with the hostname beside it, and a clipped
-	// label would be a test about truncation rather than about the view.
-	m := newTestModel(destinationRows(), 120, 12)
-	m.stack.SetMode(ModeDestination)
-	m.grouping = aggregate.GroupByIPPort
+func TestViewUngroupedShowsLocalRemoteAndState(t *testing.T) {
+	// Wide enough that LOCAL and REMOTE do not have to truncate: they share
+	// the flexible width with PROCESS, and a clipped address would be a test
+	// about truncation rather than about the view.
+	m := newTestModel(destinationRows(), 200, 12)
 
 	got := m.View()
-	for _, want := range []string{"HOST:PORT", "140.82.112.3:443", "[2606:4700:4700::1111]:53", "2.1 MB/s", "128.0 MB"} {
+	for _, want := range []string{
+		"LOCAL", "REMOTE", "STATE",
+		"192.168.1.10:51000", "140.82.112.3:443", "ESTABLISHED",
+		"2.1 MB/s", "128.0 MB",
+	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("destination view missing %q:\n%s", want, got)
+			t.Errorf("ungrouped view missing %q:\n%s", want, got)
 		}
-	}
-	if strings.Contains(got, "PID") {
-		t.Errorf("destination rows carry no PID, so the column must not appear:\n%s", got)
 	}
 }
 
 func TestUpdateNavigation(t *testing.T) {
-	// The live model is in by-process mode, so its rows are the three
-	// processes of testSnapshot: indices 0, 1 and 2.
+	// The live model is ungrouped, so its rows are the three connections of
+	// testSnapshot: indices 0, 1 and 2.
 	tests := []struct {
 		name   string
 		cursor int
@@ -569,63 +507,6 @@ func TestCursorFollowsItsRowAcrossARefresh(t *testing.T) {
 	}
 }
 
-func TestUpdateModeToggle(t *testing.T) {
-	m := newLiveModel()
-	if m.stack.Top().Mode != ModeProcess {
-		t.Fatalf("the model should start in by-process mode")
-	}
-
-	m, _ = press(t, m, "tab")
-	if m.stack.Top().Mode != ModeDestination {
-		t.Fatalf("tab did not switch to the by-destination view")
-	}
-
-	// The rows have to be rebuilt on the spot, or the header would name one
-	// view while the table still showed the other until the next tick.
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3,10.0.0.5" {
-		t.Errorf("rows = %v, want the destinations", labels)
-	}
-	if !strings.Contains(m.View(), "By Destination") {
-		t.Errorf("header still names the old view:\n%s", m.View())
-	}
-
-	m, _ = press(t, m, "tab")
-	if m.stack.Top().Mode != ModeProcess {
-		t.Errorf("tab did not switch back to the by-process view")
-	}
-	if labels := rowLabels(m); len(labels) != 3 {
-		t.Errorf("rows = %v, want the three processes", labels)
-	}
-}
-
-func TestUpdateModeToggleIsIgnoredWhileDrilledIn(t *testing.T) {
-	// Tab means "show me the other top-level view". Drilled in, the other view
-	// of the same scope is what enter offers, and unwinding the drill path on
-	// a key that normally does something small would throw away navigation the
-	// user did deliberately, so it does nothing at all.
-	m := newLiveModel()
-	m.stack.Push(Frame{Mode: ModeDestination, Label: "Process: sshd (pid 22)"})
-	m.rebuild()
-
-	before := m.View()
-	m, _ = press(t, m, "tab")
-
-	if m.stack.Depth() != 1 {
-		t.Errorf("tab changed the drill depth to %d, want it left alone", m.stack.Depth())
-	}
-	if m.stack.Top().Mode != ModeDestination {
-		t.Errorf("tab changed the drilled-in view's mode")
-	}
-	if m.View() != before {
-		t.Errorf("tab redrew the drilled-in view")
-	}
-
-	// It is not advertised where it does nothing, either.
-	if strings.Contains(m.viewFooter(), "process/destination") {
-		t.Errorf("the drilled-in footer still offers tab: %q", m.viewFooter())
-	}
-}
-
 func TestUpdateSortCycling(t *testing.T) {
 	// `s` walks every sort key in turn and wraps back to where it started.
 	m := newLiveModel()
@@ -687,44 +568,40 @@ func TestSortIsVisibleInTheView(t *testing.T) {
 	}
 }
 
-func TestUpdateGroupingToggle(t *testing.T) {
+func TestUpdateGroupingCyclesThroughAllThreeStates(t *testing.T) {
 	m := newLiveModel()
-	m, _ = press(t, m, "tab")
+	if m.grouping != aggregate.GroupNone {
+		t.Fatalf("the model should start ungrouped")
+	}
 
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3,10.0.0.5" {
-		t.Fatalf("rows = %v, want one row per remote ip", labels)
+	// Ungrouped: one row per connection.
+	if got := rowLabels(m); len(got) != 3 {
+		t.Fatalf("rows = %v, want the three connections", got)
 	}
 
 	m, _ = press(t, m, "g")
-	if m.grouping != aggregate.GroupByIPPort {
-		t.Fatalf("g did not switch to the ip:port grouping")
+	if m.grouping != aggregate.GroupByPID {
+		t.Fatalf("g did not switch to by-PID grouping")
 	}
-	if labels := rowLabels(m); len(labels) != 3 {
-		t.Errorf("rows = %v, want one row per remote ip:port", labels)
+	if got := rowLabels(m); len(got) != 3 {
+		t.Errorf("rows = %v, want one row per PID (three distinct processes)", got)
 	}
-	if !strings.Contains(m.View(), "HOST:PORT") {
-		t.Errorf("the column title did not follow the grouping:\n%s", m.View())
+	if !strings.Contains(m.View(), "By PID") {
+		t.Errorf("header did not follow the grouping:\n%s", m.View())
 	}
 
 	m, _ = press(t, m, "g")
-	if m.grouping != aggregate.GroupByIP {
-		t.Errorf("g did not switch back to the ip grouping")
+	if m.grouping != aggregate.GroupByProcessName {
+		t.Fatalf("g did not switch to by-process-name grouping")
 	}
-}
+	if !strings.Contains(m.View(), "By Process") {
+		t.Errorf("header did not follow the grouping:\n%s", m.View())
+	}
 
-func TestUpdateGroupingToggleIsIgnoredInProcessMode(t *testing.T) {
-	// The by-process view has no destinations to regroup, so g does nothing
-	// rather than quietly changing a view the user cannot see.
-	m := newLiveModel()
-	before := m.View()
-
+	// Wraps back round to ungrouped.
 	m, _ = press(t, m, "g")
-
-	if m.grouping != aggregate.GroupByIP {
-		t.Errorf("g changed the grouping from the by-process view")
-	}
-	if m.View() != before {
-		t.Errorf("g redrew the by-process view")
+	if m.grouping != aggregate.GroupNone {
+		t.Errorf("g did not wrap back to ungrouped")
 	}
 }
 
@@ -822,28 +699,11 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 	for _, binding := range allBindings(t, DefaultKeyMap()) {
 		for _, k := range binding.Keys() {
 			t.Run(k, func(t *testing.T) {
-				// Set the model up so that every binding has something to act
-				// on: destinations at the finest grouping give g something to
-				// coarsen and leave three rows to move between, and a filter
-				// already in force gives `/` something to open over.
+				// A filter already in force gives `/` something to open over.
 				m := newLiveModel()
-				m.stack.SetMode(ModeDestination)
-				m.grouping = aggregate.GroupByIPPort
 				m.filter = "1"
 				m.rebuild()
 				m.cursor = 1
-
-				if len(m.rows) != 3 {
-					t.Fatalf("setup has %d rows, want 3", len(m.rows))
-				}
-
-				// Esc only has a frame to pop once the user has drilled in,
-				// which is the only context the footer offers it in, so it is
-				// exercised there rather than at the top level where doing
-				// nothing is the deliberate behaviour.
-				if key.Matches(keyMsg(k), m.keys.Back) {
-					m, _ = press(t, m, "enter")
-				}
 
 				before := modelState(m, nil)
 				next, cmd := press(t, m, k)
@@ -860,8 +720,8 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 // modelState is everything a keypress can observably change, rendered so that
 // a test can tell "the model reacted" from "the model did not".
 func modelState(m Model, cmd tea.Cmd) string {
-	return fmt.Sprintf("mode=%d grouping=%d sort=%s cursor=%d depth=%d rows=%v paused=%t help=%t filter=%q filtering=%t quit=%t",
-		m.stack.Top().Mode, m.grouping, m.sort, m.cursor, m.stack.Depth(),
+	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t filter=%q filtering=%t quit=%t",
+		m.grouping, m.sort, m.cursor,
 		rowLabels(m), m.paused, m.showHelp, m.filter, m.filtering, cmd != nil)
 }
 
@@ -874,477 +734,28 @@ func rowLabels(m Model) []string {
 	return out
 }
 
-func TestViewHeaderKeepsTheBreadcrumbWhenSpaceRunsOut(t *testing.T) {
-	// On a terminal too narrow for both, the drill path wins: it is the only
-	// thing saying which scope is on screen, whereas the sort it displaces is
-	// still marked on the column it orders.
-	m := newTestModel(processRows(), 50, 12)
-	m.stack.Push(Frame{Mode: ModeDestination, Label: "Process: Google Chrome Helper (pid 980)"})
-
-	got := m.viewHeader()
-	if w := lipgloss.Width(got); w != 50 {
-		t.Errorf("header width = %d, want 50", w)
-	}
-	if !strings.Contains(got, "(pid 980)") {
-		t.Errorf("header %q dropped the breadcrumb", got)
-	}
-	if strings.Contains(got, "sort:") {
-		t.Errorf("header %q kept the status at the breadcrumb's expense", got)
-	}
-}
-
-func TestViewHeaderNeverDropsThePausedFlag(t *testing.T) {
-	// The sort and interface are said elsewhere on the screen and can give
-	// their cells to the breadcrumb. The capture flag cannot: a frozen table
-	// looks exactly like a live one that has gone quiet.
-	m := newTestModel(processRows(), 60, 12)
-	m.paused = true
-	m.stack.Push(Frame{Mode: ModeDestination, Label: "Process: Google Chrome Helper (pid 980)"})
-
-	got := m.viewHeader()
-	if w := lipgloss.Width(got); w != 60 {
-		t.Errorf("header width = %d, want 60", w)
-	}
-	if !strings.Contains(got, "PAUSED") {
-		t.Errorf("header %q dropped the paused flag to fit the breadcrumb", got)
-	}
-	if !strings.Contains(got, "(pid 980)") {
-		t.Errorf("header %q dropped the breadcrumb", got)
-	}
-	if strings.Contains(got, "sort:") {
-		t.Errorf("header %q kept the status at the breadcrumb's expense", got)
-	}
-}
-
-func TestBreadcrumbSegment(t *testing.T) {
-	const process = "Process: Chrome (pid 4821)"
-	const destination = "Destination: 140.82.112.3:443"
-
-	tests := []struct {
-		name string
-		path string
-		mode Mode
-		w    int
-		want string
-	}{
-		{
-			// The plan's wording, verbatim, whenever the bar has room for it.
-			name: "process drilled into its destinations",
-			path: process, mode: ModeDestination, w: 60,
-			want: "› Process: Chrome (pid 4821) → Destinations",
-		},
-		{
-			name: "destination drilled into its processes",
-			path: destination, mode: ModeProcess, w: 60,
-			want: "› Destination: 140.82.112.3:443 → Processes",
-		},
-		{
-			name: "two levels deep",
-			path: process + " → " + destination, mode: ModeProcess, w: 100,
-			want: "› Process: Chrome (pid 4821) → Destination: 140.82.112.3:443 → Processes",
-		},
-		{
-			// The noun goes first: the mode label at the other end of the bar
-			// is already saying it.
-			name: "the trailing noun is dropped before the path is cut",
-			path: process, mode: ModeDestination, w: 30,
-			want: "› Process: Chrome (pid 4821)",
-		},
-		{
-			name: "the path is cut from the left",
-			path: process, mode: ModeDestination, w: 20,
-			want: "› …Chrome (pid 4821)",
-		},
-		{
-			// Anything this narrow would say nothing, so the status keeps the
-			// cells instead.
-			name: "no room to say anything",
-			path: process, mode: ModeDestination, w: 8,
-			want: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := breadcrumbSegment(tc.path, tc.mode, tc.w)
-			if got != tc.want {
-				t.Errorf("breadcrumbSegment = %q, want %q", got, tc.want)
-			}
-			if w := lipgloss.Width(got); w > tc.w {
-				t.Errorf("breadcrumbSegment is %d cells wide, over the %d it was given", w, tc.w)
-			}
-		})
-	}
-}
-
-func TestUpdateDrillIntoProcess(t *testing.T) {
-	m := newLiveModel()
-	if got := m.rows[0].Label; got != "com.apple.WebKit.Networking" {
-		t.Fatalf("fixture puts %q first, want com.apple.WebKit.Networking", got)
-	}
-
-	m, _ = press(t, m, "enter")
-
-	if m.stack.Depth() != 1 || m.stack.Top().Mode != ModeDestination {
-		t.Fatalf("depth = %d, mode = %d; want a by-destination view one level down",
-			m.stack.Depth(), m.stack.Top().Mode)
-	}
-
-	// Only the selected process's destinations: sshd's remote host is on the
-	// unfiltered table and must not survive the drill.
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3" {
-		t.Errorf("rows = %v, want only the selected process's destinations", labels)
-	}
-	if want := "Process: com.apple.WebKit.Networking (pid 412)"; m.stack.Breadcrumb() != want {
-		t.Errorf("breadcrumb = %q, want %q", m.stack.Breadcrumb(), want)
-	}
-
-	// The cursor starts at the top of a view whose rows are not the rows it
-	// was pointing at.
-	if m.cursor != 0 {
-		t.Errorf("cursor = %d, want it reset to 0", m.cursor)
-	}
-}
-
-func TestUpdateDrillIntoDestination(t *testing.T) {
-	tests := []struct {
-		name      string
-		grouping  aggregate.Grouping
-		wantRows  string
-		wantCrumb string
-	}{
-		{
-			// Grouped by IP the whole host is in scope, so both of the
-			// processes talking to it come through.
-			name:      "by ip",
-			grouping:  aggregate.GroupByIP,
-			wantRows:  "com.apple.WebKit.Networking,Google Chrome Helper",
-			wantCrumb: "Destination: 140.82.112.3",
-		},
-		{
-			// Grouped by IP:port only the process on that port does.
-			name:      "by ip:port",
-			grouping:  aggregate.GroupByIPPort,
-			wantRows:  "com.apple.WebKit.Networking",
-			wantCrumb: "Destination: 140.82.112.3:443",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newLiveModel()
-			m.stack.SetMode(ModeDestination)
-			m.grouping = tc.grouping
-			m.rebuild()
-
-			m, _ = press(t, m, "enter")
-
-			if m.stack.Depth() != 1 || m.stack.Top().Mode != ModeProcess {
-				t.Fatalf("depth = %d, mode = %d; want a by-process view one level down",
-					m.stack.Depth(), m.stack.Top().Mode)
-			}
-			if labels := rowLabels(m); strings.Join(labels, ",") != tc.wantRows {
-				t.Errorf("rows = %v, want %q", labels, tc.wantRows)
-			}
-			if m.stack.Breadcrumb() != tc.wantCrumb {
-				t.Errorf("breadcrumb = %q, want %q", m.stack.Breadcrumb(), tc.wantCrumb)
-			}
-		})
-	}
-}
-
-func TestUpdateDrillsAndUnwindsSeveralLevels(t *testing.T) {
-	m := newLiveModel()
-	m.cursor = 1 // Google Chrome Helper
-
-	// Process → destinations of that process.
-	m, _ = press(t, m, "enter")
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3" {
-		t.Fatalf("depth 1 rows = %v, want the process's destinations", labels)
-	}
-
-	// → processes talking to that destination, still inside the process
-	// scope: the filters compose rather than replace one another.
-	m, _ = press(t, m, "enter")
-	if m.stack.Depth() != 2 || m.stack.Top().Mode != ModeProcess {
-		t.Fatalf("depth = %d, mode = %d; want a by-process view two levels down",
-			m.stack.Depth(), m.stack.Top().Mode)
-	}
-	if labels := rowLabels(m); strings.Join(labels, ",") != "Google Chrome Helper" {
-		t.Errorf("depth 2 rows = %v, want only the process the path is scoped to", labels)
-	}
-
-	want := "Process: Google Chrome Helper (pid 980) → Destination: 140.82.112.3"
-	if m.stack.Breadcrumb() != want {
-		t.Errorf("breadcrumb = %q, want %q", m.stack.Breadcrumb(), want)
-	}
-
-	// Drilling again would re-apply a filter already on the path, so it is
-	// refused rather than stacking up identical views to esc back through.
-	before := modelState(m, nil)
-	m, _ = press(t, m, "enter")
-	if got := modelState(m, nil); got != before {
-		t.Errorf("re-drilling into a scope already on the stack changed the view:\n%s\nwant:\n%s", got, before)
-	}
-
-	// Esc and backspace unwind the same path a level at a time.
-	m, _ = press(t, m, "esc")
-	if m.stack.Depth() != 1 || m.stack.Top().Mode != ModeDestination {
-		t.Fatalf("esc left depth %d in mode %d", m.stack.Depth(), m.stack.Top().Mode)
-	}
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3" {
-		t.Errorf("rows after esc = %v, want the intermediate destination view", labels)
-	}
-	if want := "Process: Google Chrome Helper (pid 980)"; m.stack.Breadcrumb() != want {
-		t.Errorf("breadcrumb after esc = %q, want %q", m.stack.Breadcrumb(), want)
-	}
-
-	m, _ = press(t, m, "backspace")
-	if m.stack.Depth() != 0 || m.stack.Top().Mode != ModeProcess {
-		t.Fatalf("backspace left depth %d in mode %d", m.stack.Depth(), m.stack.Top().Mode)
-	}
-	if labels := rowLabels(m); len(labels) != 3 {
-		t.Errorf("rows back at the top = %v, want the three unfiltered processes", labels)
-	}
-	if m.stack.Breadcrumb() != "" {
-		t.Errorf("breadcrumb = %q, want empty at the top level", m.stack.Breadcrumb())
-	}
-}
-
-func TestUpdateDrillOutAtTheTopLevel(t *testing.T) {
-	// There is nothing to pop, so esc does nothing at all — it is not offered
-	// in the footer here either, and leaving it unclaimed at depth 0 is what
-	// lets milestone 7 hand it to the filter input.
-	for _, k := range []string{"esc", "backspace"} {
-		t.Run(k, func(t *testing.T) {
-			m := newLiveModel()
-			m.cursor = 1
-
-			before := modelState(m, nil)
-			next, cmd := press(t, m, k)
-
-			if got := modelState(next, cmd); got != before {
-				t.Errorf("%q at the top level changed the view:\n%s\nwant:\n%s", k, got, before)
-			}
-		})
-	}
-}
-
-func TestUpdateDrillWithNothingSelected(t *testing.T) {
-	tests := []struct {
-		name  string
-		model func() Model
-	}{
-		{
-			// Nothing captured yet: enter must be a no-op rather than an index
-			// off the end of an empty table.
-			name:  "empty table",
-			model: func() Model { return newTestModel(nil, 100, 12) },
-		},
-		{
-			name: "cursor past the last row",
-			model: func() Model {
-				m := newLiveModel()
-				m.cursor = len(m.rows) + 5
-				return m
-			},
-		},
-		{
-			// The view renders a table with no selection at all, so drilling
-			// has to cope with it too.
-			name: "no selection",
-			model: func() Model {
-				m := newLiveModel()
-				m.cursor = -1
-				return m
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := tc.model()
-
-			m, _ = press(t, m, "enter")
-
-			if m.stack.Depth() != 0 {
-				t.Errorf("depth = %d, want no drill without a selected row", m.stack.Depth())
-			}
-			m.View() // must not panic
-		})
-	}
-}
-
-func TestDrillFilterSurvivesARefresh(t *testing.T) {
-	m := newLiveModel()
-	m.cursor = 1 // Google Chrome Helper
-
-	m, _ = press(t, m, "enter")
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3" {
-		t.Fatalf("rows = %v, want the drilled process's destinations", labels)
-	}
-
-	// Refresh with a snapshot that reorders the table the drill was made from
-	// — sshd is now by far the busiest process — and gives the drilled process
-	// a second destination. The frame filters on the PID it captured, so the
-	// view has to follow the process rather than whatever row now sits where
-	// the cursor was.
-	snap := testSnapshot()
-	snap.Connections[2].RateInBps = 1 << 30
-	snap.Connections = append(snap.Connections, aggregate.ConnectionRecord{
-		PID: 980, ProcessName: "Google Chrome Helper",
-		LocalPort: 51002, RemoteAddr: "93.184.216.34", RemotePort: 443, Proto: "tcp",
-		BytesInTotal: 8192, RateInBps: 4096, LastSeen: testNow,
-	})
-	m.snap = snap
-	m.rebuild()
-
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3,93.184.216.34" {
-		t.Errorf("rows = %v, want the drilled process's destinations and nothing else", labels)
-	}
-	if want := "Process: Google Chrome Helper (pid 980)"; m.stack.Breadcrumb() != want {
-		t.Errorf("breadcrumb = %q, want %q", m.stack.Breadcrumb(), want)
-	}
-}
-
-func TestDrilledViewWhoseSubjectDisappears(t *testing.T) {
-	m := newLiveModel()
-	m.cursor = 2 // sshd
-
-	m, _ = press(t, m, "enter")
-	if labels := rowLabels(m); strings.Join(labels, ",") != "10.0.0.5" {
-		t.Fatalf("rows = %v, want sshd's destination", labels)
-	}
-
-	// The process exits and its connections age out from under the drill.
-	snap := testSnapshot()
-	snap.Connections = snap.Connections[:2]
-	m.snap = snap
-	m.rebuild()
-
-	// The view empties out rather than quietly falling back to showing
-	// everything, and the user is left where they were, with a way out.
-	if len(m.rows) != 0 {
-		t.Errorf("rows = %v, want the scope to empty rather than widen", rowLabels(m))
-	}
-	if m.stack.Depth() != 1 || m.cursor != 0 {
-		t.Errorf("depth = %d, cursor = %d; want the drill left intact", m.stack.Depth(), m.cursor)
-	}
-	if want := "Process: sshd (pid 22)"; m.stack.Breadcrumb() != want {
-		t.Errorf("breadcrumb = %q, want %q", m.stack.Breadcrumb(), want)
-	}
-
-	got := m.View()
-	if !strings.Contains(got, strings.TrimSpace(emptyScopeMessage)) {
-		t.Errorf("an emptied-out drill should say so, got:\n%s", got)
-	}
-	if strings.Contains(got, "140.82.112.3") {
-		t.Errorf("the emptied drill fell back to showing every destination:\n%s", got)
-	}
-
-	// And esc still leads back to the traffic that is left.
-	m, _ = press(t, m, "esc")
-	if labels := rowLabels(m); len(labels) != 2 {
-		t.Errorf("rows after esc = %v, want the two surviving processes", labels)
-	}
-}
-
-// twoPortSnapshot has one process talking to two ports of the same host, which
-// is what makes the difference between an IP-scoped and an IP:port-scoped
-// drill visible.
-func twoPortSnapshot() aggregate.Snapshot {
-	return aggregate.Snapshot{
-		At: testNow,
-		Connections: []aggregate.ConnectionRecord{
-			{
-				PID: 412, ProcessName: "com.apple.WebKit.Networking",
-				LocalPort: 51000, RemoteAddr: "140.82.112.3", RemotePort: 443, Proto: "tcp",
-				BytesInTotal: 1000, RateInBps: 100, LastSeen: testNow,
-			},
-			{
-				PID: 412, ProcessName: "com.apple.WebKit.Networking",
-				LocalPort: 51001, RemoteAddr: "140.82.112.3", RemotePort: 80, Proto: "tcp",
-				BytesInTotal: 500, RateInBps: 50, LastSeen: testNow,
-			},
-			{
-				PID: 980, ProcessName: "Google Chrome Helper",
-				LocalPort: 51002, RemoteAddr: "140.82.112.3", RemotePort: 443, Proto: "tcp",
-				BytesInTotal: 100, RateInBps: 10, LastSeen: testNow,
-			},
-		},
-	}
-}
-
-func TestGroupingToggleDoesNotWidenAPushedFrame(t *testing.T) {
-	// A frame is filtered on what the user selected at the moment they
-	// selected it. `g` changes how the view on top of it buckets rows, and
-	// must not reach back and coarsen a scope chosen as one specific port.
-	m := newTestModel(nil, 100, 12)
-	m.snap = twoPortSnapshot()
-	m.stack.SetMode(ModeDestination)
-	m.grouping = aggregate.GroupByIPPort
-	m.rebuild()
-
-	m, _ = press(t, m, "enter") // → processes talking to 140.82.112.3:443
-	m, _ = press(t, m, "enter") // → that process's destinations, still port-scoped
-
-	if m.stack.Depth() != 2 || m.stack.Top().Mode != ModeDestination {
-		t.Fatalf("depth = %d, mode = %d; want a by-destination view two levels down",
-			m.stack.Depth(), m.stack.Top().Mode)
-	}
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3:443" {
-		t.Fatalf("rows = %v, want the one port the path is scoped to", labels)
-	}
-
-	m, _ = press(t, m, "g")
-
-	if m.grouping != aggregate.GroupByIP {
-		t.Fatalf("g did not coarsen the current view's grouping")
-	}
-	if labels := rowLabels(m); strings.Join(labels, ",") != "140.82.112.3" {
-		t.Errorf("rows = %v, want the host without its port", labels)
-	}
-
-	// The row is now labelled by host, but it is still one connection: the
-	// process's traffic to port 80 stays outside the scope the user drilled
-	// into, and the breadcrumb still says so.
-	if got := m.rows[0].Connections; got != 1 {
-		t.Errorf("row covers %d connections, want the 1 still in scope", got)
-	}
-	if want := "Destination: 140.82.112.3:443"; !strings.Contains(m.stack.Breadcrumb(), want) {
-		t.Errorf("breadcrumb = %q, want it to still name %q", m.stack.Breadcrumb(), want)
-	}
-
-	// Unwinding lands back on the whole host, at the grouping now in force.
-	m = pressAll(t, m, "esc", "esc")
-	if m.stack.Depth() != 0 || len(m.rows) != 1 || m.rows[0].Connections != 3 {
-		t.Errorf("after unwinding: depth %d, rows %v", m.stack.Depth(), rowLabels(m))
-	}
-}
-
 func TestHostnameColumnShowsTheAddressUntilItResolves(t *testing.T) {
 	// A model with no resolver behind it stands in for the state every
 	// destination is in on the first frame: the query has not answered, and
 	// the bare address is what there is to show.
-	m := newTestModel(destinationRows(), 120, 12)
-	m.stack.SetMode(ModeDestination)
+	m := newTestModel(destinationRows(), 200, 12)
 
 	got := m.View()
 	if !strings.Contains(got, "HOSTNAME") {
-		t.Fatalf("destination view has no hostname column:\n%s", got)
+		t.Fatalf("ungrouped view has no hostname column:\n%s", got)
 	}
 
-	// The address appears twice on the row — once as the host, once standing
-	// in for its unresolved name — which is what tells the two columns apart
-	// from a single column that happens to be wide.
+	// The address appears twice on the row — once as the remote, once
+	// standing in for its unresolved name — which is what tells the two
+	// columns apart from a single column that happens to be wide.
 	line := tableLine(t, got, "140.82.112.3")
 	if n := strings.Count(line, "140.82.112.3"); n != 2 {
-		t.Errorf("row shows the address %d times, want 2 (host and unresolved hostname):\n%s", n, line)
+		t.Errorf("row shows the address %d times, want 2 (remote and unresolved hostname):\n%s", n, line)
 	}
 }
 
 func TestHostnameColumnShowsResolvedNames(t *testing.T) {
-	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 120, 12)
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
 
 	got := m.View()
 	if !strings.Contains(got, "lb.github.com") {
@@ -1365,32 +776,41 @@ func TestHostnameColumnShowsResolvedNames(t *testing.T) {
 	}
 }
 
-func TestHostnamesAreNotShownInProcessMode(t *testing.T) {
-	// ByProcess rows carry no destination, so a hostname column there would be
-	// a column of nothing at all.
+func TestStateColumnHiddenWhenGrouped(t *testing.T) {
+	// GroupByPID and GroupByProcessName both roll up per remote endpoint, so
+	// REMOTE and HOSTNAME still mean something and must appear; STATE does
+	// not, since a grouped row can roll up more than one connection's state.
 	m := newTestModel(processRows(), 120, 12)
+	m.grouping = aggregate.GroupByPID
 
-	if got := m.View(); strings.Contains(got, "HOSTNAME") {
-		t.Errorf("process view has a hostname column:\n%s", got)
+	got := m.View()
+	if strings.Contains(got, "STATE") {
+		t.Errorf("grouped view has a STATE column:\n%s", got)
+	}
+	for _, wanted := range []string{"HOSTNAME", "REMOTE"} {
+		if !strings.Contains(got, wanted) {
+			t.Errorf("grouped view is missing its %s column:\n%s", wanted, got)
+		}
 	}
 }
 
 func TestFilterMatchesResolvedHostnames(t *testing.T) {
-	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 120, 12)
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
 	m.snap = testSnapshot()
 	m.rebuild()
 
 	m = pressAll(t, m, "/", "g", "i", "t", "h", "u", "b", "enter")
 
-	// Both of that host's ports match, and the host that does not resolve does
-	// not: the filter is reading a name that is nowhere in the row's label.
+	// Both connections to that host match, on either port, and the one to a
+	// different host does not: the filter is reading a name that is nowhere
+	// in the row's label.
 	got := rowLabels(m)
 	if len(got) != 2 {
-		t.Fatalf("rows = %v, want both ports of the github destination", got)
+		t.Fatalf("rows = %v, want both connections to the github destination", got)
 	}
 	for _, label := range got {
-		if !strings.HasPrefix(label, "140.82.112.3") {
-			t.Errorf("rows = %v, want only the github destination", got)
+		if label != "com.apple.WebKit.Networking" && label != "Google Chrome Helper" {
+			t.Errorf("rows = %v, want only the processes talking to the github destination", got)
 		}
 	}
 }
@@ -1444,7 +864,7 @@ func TestFilterInputCapturesKeystrokes(t *testing.T) {
 	if m.sort != SortRate {
 		t.Errorf("typing into the filter changed the sort to %s", m.sort)
 	}
-	if m.grouping != aggregate.GroupByIP {
+	if m.grouping != aggregate.GroupNone {
 		t.Errorf("typing into the filter changed the grouping")
 	}
 	if got, want := m.filter, "qpgsrjkG?"; got != want {
@@ -1471,10 +891,6 @@ func TestHelpOverlayClosesWithQuestionMarkOrEsc(t *testing.T) {
 	}{
 		{name: "same key toggles it off", key: "?"},
 		{name: "esc also dismisses it", key: "esc"},
-		// Back is bound to both esc and backspace, and the bug this guards
-		// against only showed up on the second of the two: esc happened to be
-		// special-cased already, backspace fell through to drillOut.
-		{name: "backspace also dismisses it, being the other half of Back", key: "backspace"},
 	}
 
 	for _, tc := range tests {
@@ -1503,7 +919,7 @@ func TestHelpOverlayIgnoresEverythingElse(t *testing.T) {
 	}{
 		{name: "cursor movement", key: "j"},
 		{name: "pause", key: "p"},
-		{name: "mode toggle", key: "tab"},
+		{name: "grouping", key: "g"},
 		{name: "filter", key: "/"},
 	}
 
@@ -1524,31 +940,6 @@ func TestHelpOverlayIgnoresEverythingElse(t *testing.T) {
 				t.Errorf("%q changed the model while help was open:\n%s\nwant:\n%s", tc.key, got, before)
 			}
 		})
-	}
-}
-
-func TestEscClosesHelpRatherThanDrillingOut(t *testing.T) {
-	// esc is also the Back binding, which pops the drill stack. While help is
-	// showing, esc must dismiss the overlay instead of acting on whatever is
-	// underneath it — otherwise closing help would silently drill out too.
-	m := newLiveModel()
-	m.cursor = 1 // Google Chrome Helper
-	m, _ = press(t, m, "enter")
-	if m.stack.Depth() != 1 {
-		t.Fatalf("setup: depth = %d, want 1", m.stack.Depth())
-	}
-
-	m, _ = press(t, m, "?")
-	if !m.showHelp {
-		t.Fatalf("? did not open the help overlay")
-	}
-
-	m, _ = press(t, m, "esc")
-	if m.showHelp {
-		t.Errorf("esc did not close the help overlay")
-	}
-	if m.stack.Depth() != 1 {
-		t.Errorf("depth = %d, want esc to leave the drill stack untouched while closing help", m.stack.Depth())
 	}
 }
 
@@ -1576,12 +967,6 @@ func TestFilterEnterCommits(t *testing.T) {
 	if got := rowLabels(m); len(got) != 1 || got[0] != "sshd" {
 		t.Errorf("rows = %v, want just sshd", got)
 	}
-
-	// Enter is the drill key everywhere else; committing a filter must not
-	// also open the row under the cursor.
-	if d := m.stack.Depth(); d != 0 {
-		t.Errorf("committing the filter drilled in: depth = %d, want 0", d)
-	}
 }
 
 func TestFilterEscCancelsAndRestores(t *testing.T) {
@@ -1601,73 +986,6 @@ func TestFilterEscCancelsAndRestores(t *testing.T) {
 	}
 	if got := rowLabels(m); len(got) != 1 || got[0] != "sshd" {
 		t.Errorf("rows = %v, want the previous filter's rows back", got)
-	}
-}
-
-func TestFilterEscDoesNotPopTheDrillStack(t *testing.T) {
-	// Esc is the way back out of a drill-down, and it is also the way out of
-	// the filter input. Cancelling an edit must cost the user only the edit:
-	// unwinding a level of navigation they did deliberately, on the same
-	// keypress, is exactly the conflict milestone 6 left esc free to avoid.
-	m := pressAll(t, newLiveModel(), "enter")
-	if m.stack.Depth() != 1 {
-		t.Fatalf("setup is at depth %d, want 1", m.stack.Depth())
-	}
-
-	m = pressAll(t, m, "/", "1", "esc")
-
-	if got := m.stack.Depth(); got != 1 {
-		t.Errorf("depth = %d after cancelling a filter, want 1", got)
-	}
-	if m.filtering {
-		t.Errorf("esc did not close the filter input")
-	}
-
-	// And with the input closed, esc means what it did before.
-	m = pressAll(t, m, "esc")
-	if got := m.stack.Depth(); got != 0 {
-		t.Errorf("depth = %d, want esc to pop the drill stack once the input is gone", got)
-	}
-}
-
-func TestFilterComposesWithDrillDown(t *testing.T) {
-	m := newLiveModel()
-	m.stack.SetMode(ModeDestination)
-	m.rebuild()
-
-	// Two of the three connections go to the same host, so drilling into it
-	// scopes the process view to exactly those two.
-	m = pressAll(t, m, "enter")
-	if got := rowLabels(m); len(got) != 2 {
-		t.Fatalf("drilled rows = %v, want the two processes talking to 140.82.112.3", got)
-	}
-
-	// The filter narrows what the drill-down already scoped rather than
-	// replacing it.
-	m = pressAll(t, m, "/", "c", "h", "r", "o", "m", "e", "enter")
-	if got := rowLabels(m); len(got) != 1 || got[0] != "Google Chrome Helper" {
-		t.Errorf("rows = %v, want the filter applied inside the drilled scope", got)
-	}
-	if got := m.stack.Depth(); got != 1 {
-		t.Errorf("depth = %d, want the drill-down still in force", got)
-	}
-
-	// And popping the drill-down leaves the filter behind: it is a property of
-	// the table rather than of one level of it, so the destination view it
-	// lands back on is narrowed by it too — to nothing, no destination being
-	// called "chrome".
-	m = pressAll(t, m, "esc")
-	if m.filter != "chrome" {
-		t.Errorf("filter = %q, want it to survive the pop", m.filter)
-	}
-	if got := rowLabels(m); len(got) != 0 {
-		t.Errorf("rows = %v, want the filter still narrowing the top-level view", got)
-	}
-
-	// Clearing it hands that view back.
-	m = pressAll(t, m, "/", "enter")
-	if got := rowLabels(m); len(got) != 2 {
-		t.Errorf("rows = %v, want the whole destination view back", got)
 	}
 }
 
@@ -1754,18 +1072,9 @@ func TestEmptyTableSaysWhyItIsEmpty(t *testing.T) {
 			want:  emptyMessage,
 		},
 		{
-			name: "a drilled-in scope that emptied",
-			model: func() Model {
-				m := pressAll(t, newLiveModel(), "enter")
-				m.snap = aggregate.Snapshot{At: testNow}
-				m.rebuild()
-				return m
-			},
-			want: emptyScopeMessage,
-		},
-		{
-			// The filter wins over both: it is the thing the user typed a
-			// moment ago, and the header is already naming it a line above.
+			// The filter wins over the idle-capture message: it is the thing
+			// the user typed a moment ago, and the header is already naming
+			// it a line above.
 			name:  "a filter that matches nothing",
 			model: func() Model { return pressAll(t, newLiveModel(), "/", "z", "z", "z", "enter") },
 			want:  emptyFilterMessage,

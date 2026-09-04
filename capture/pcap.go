@@ -14,9 +14,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// bpfFilter keeps the kernel from handing us anything we cannot attribute to a
-// socket: only IPv4/IPv6 carrying TCP or UDP survives it.
-const bpfFilter = "(ip or ip6) and (tcp or udp)"
+// bpfFilter keeps the kernel from handing us anything the decoder cannot use:
+// TCP/UDP (attributable to a socket), plus ICMP and ARP, which are shown with
+// no process attribution since neither has one.
+const bpfFilter = "tcp or udp or icmp or icmp6 or arp"
 
 // readTimeout bounds how long one read blocks inside libpcap.
 //

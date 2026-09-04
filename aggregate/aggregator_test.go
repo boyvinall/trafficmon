@@ -11,8 +11,8 @@ import (
 	"github.com/boyvinall/mac-nethogs/procinfo"
 )
 
-// localAddr is the host end of every flow the tests build; the join never
-// looks at it beyond copying it into the record.
+// localAddr is the host end of every connection the tests build; the join
+// never looks at it beyond copying it into the record.
 const localAddr = "192.168.1.10"
 
 func mustAddr(t testing.TB, s string) netip.Addr {
@@ -24,16 +24,30 @@ func mustAddr(t testing.TB, s string) netip.Addr {
 	return a
 }
 
-// flow builds a TCP flow key with the shared local address. t may be a *testing.T
-// or a *testing.B, so the same builder serves both tests and benchmarks.
-func flow(t testing.TB, localPort uint16, remote string, remotePort uint16) capture.FlowKey {
+// conn builds a TCP connection with the shared local address, as procinfo's
+// poller would report it. t may be a *testing.T or a *testing.B, so the same
+// builder serves both tests and benchmarks.
+func conn(t testing.TB, pid int32, name string, localPort uint16, remote string, remotePort uint16) procinfo.Connection {
 	t.Helper()
+	return procinfo.Connection{
+		PID:         pid,
+		ProcessName: name,
+		LocalAddr:   mustAddr(t, localAddr),
+		LocalPort:   localPort,
+		RemoteAddr:  mustAddr(t, remote),
+		RemotePort:  remotePort,
+		Proto:       "tcp",
+	}
+}
+
+// flowFor builds the capture.FlowKey that joins onto c.
+func flowFor(c procinfo.Connection) capture.FlowKey {
 	return capture.FlowKey{
-		LocalAddr:  mustAddr(t, localAddr),
-		LocalPort:  localPort,
-		RemoteAddr: mustAddr(t, remote),
-		RemotePort: remotePort,
-		Proto:      capture.ProtoTCP,
+		LocalAddr:  c.LocalAddr,
+		LocalPort:  c.LocalPort,
+		RemoteAddr: c.RemoteAddr,
+		RemotePort: c.RemotePort,
+		Proto:      protoFromString(c.Proto),
 	}
 }
 
@@ -78,20 +92,18 @@ func rowKeys(rows []Row) []string {
 	return out
 }
 
-func TestJoinAttributesConnectionsToOwningProcess(t *testing.T) {
+func TestJoinMergesTrafficOntoOpenConnections(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
 
+	c1 := conn(t, 42, "curl", 51000, "140.82.112.3", 443)
+	c2 := conn(t, 42, "curl", 51001, "140.82.112.3", 80)
 	flows := map[capture.FlowKey]capture.FlowStats{
-		flow(t, 51000, "140.82.112.3", 443): stats(4000, 1000, now),
-		flow(t, 51001, "140.82.112.3", 80):  stats(20, 30, now),
-	}
-	ports := map[uint16]procinfo.Process{
-		51000: {PID: 42, Name: "curl"},
-		51001: {PID: 42, Name: "curl"},
+		flowFor(c1): stats(4000, 1000, now),
+		flowFor(c2): stats(20, 30, now),
 	}
 
-	snap := a.join(flows, ports, now)
+	snap := a.join([]procinfo.Connection{c1, c2}, flows, now)
 	if len(snap.Connections) != 2 {
 		t.Fatalf("join() produced %d records, want 2", len(snap.Connections))
 	}
@@ -103,6 +115,7 @@ func TestJoinAttributesConnectionsToOwningProcess(t *testing.T) {
 	want := ConnectionRecord{
 		PID:           42,
 		ProcessName:   "curl",
+		LocalAddr:     localAddr,
 		LocalPort:     51000,
 		RemoteAddr:    "140.82.112.3",
 		RemotePort:    443,
@@ -112,189 +125,226 @@ func TestJoinAttributesConnectionsToOwningProcess(t *testing.T) {
 		RateInBps:     800,
 		RateOutBps:    200,
 		LastSeen:      now,
+		LastPolled:    now,
 	}
 	if got != want {
 		t.Errorf("record =\n %+v\nwant\n %+v", got, want)
 	}
 
-	// Both connections belong to one process, so they roll up into one row.
-	rows := ByProcess(snap)
-	if len(rows) != 1 {
-		t.Fatalf("ByProcess() produced %d rows, want 1", len(rows))
-	}
-	if rows[0].Connections != 2 || rows[0].BytesInTotal != 4020 {
-		t.Errorf("row = %+v, want 2 connections and 4020 bytes in", rows[0])
+	// The two connections belong to one process but talk to two different
+	// destinations, so grouping by PID gives each its own row.
+	rows := Rows(snap, GroupByPID)
+	if len(rows) != 2 {
+		t.Fatalf("Rows(GroupByPID) produced %d rows, want 2", len(rows))
 	}
 }
 
-func TestJoinBucketsUnattributedTrafficIntoUnknown(t *testing.T) {
+func TestJoinShowsAConnectionWithNoTrafficYet(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
 
-	flows := map[capture.FlowKey]capture.FlowStats{
-		flow(t, 51000, "140.82.112.3", 443): stats(4000, 1000, now),
-		flow(t, 51999, "1.1.1.1", 53):       stats(70, 30, now),
-	}
-	ports := map[uint16]procinfo.Process{51000: {PID: 42, Name: "curl"}}
+	c := conn(t, 42, "ssh", 51000, "140.82.112.3", 22)
 
-	snap := a.join(flows, ports, now)
-	if len(snap.Connections) != 2 {
-		t.Fatalf("join() produced %d records, want 2 (unattributed traffic must not vanish)", len(snap.Connections))
+	// No capture data at all: the connection must still produce a row, with
+	// zero bytes and no LastSeen, and must not read as Closed.
+	snap := a.join([]procinfo.Connection{c}, map[capture.FlowKey]capture.FlowStats{}, now)
+	if len(snap.Connections) != 1 {
+		t.Fatalf("join() produced %d records, want 1", len(snap.Connections))
 	}
-
-	orphan := recordFor(t, snap, "1.1.1.1", 53)
-	if orphan.PID != UnknownProcess.PID || orphan.ProcessName != UnknownProcess.Name {
-		t.Errorf("unattributed record = (%d, %q), want (%d, %q)",
-			orphan.PID, orphan.ProcessName, UnknownProcess.PID, UnknownProcess.Name)
+	got := recordFor(t, snap, "140.82.112.3", 22)
+	if got.BytesInTotal != 0 || got.BytesOutTotal != 0 || !got.LastSeen.IsZero() {
+		t.Errorf("record with no capture data = %+v, want zero traffic and zero LastSeen", got)
 	}
-	if orphan.BytesInTotal != 70 || orphan.BytesOutTotal != 30 {
-		t.Errorf("unattributed counters = (%d, %d), want (70, 30)", orphan.BytesInTotal, orphan.BytesOutTotal)
-	}
-
-	// The unknown bucket is a normal row, so the bytes stay visible.
-	rows := ByProcess(snap)
-	unknown := rowFor(t, rows, "-1")
-	if unknown.Label != "unknown" || unknown.Connections != 1 || unknown.BytesInTotal != 70 {
-		t.Errorf("unknown row = %+v, want label unknown, 1 connection, 70 bytes in", unknown)
+	if got.Closed(now) {
+		t.Error("a freshly polled connection with no traffic yet reports Closed")
 	}
 }
 
-func TestJoinReattributesReusedPort(t *testing.T) {
+func TestJoinKeepsVanishedConnectionWithinGracePeriod(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
 
-	key := flow(t, 51000, "140.82.112.3", 443)
+	c := conn(t, 42, "dig", 51000, "1.1.1.1", 53)
+	a.join([]procinfo.Connection{c}, map[capture.FlowKey]capture.FlowStats{}, now)
 
-	// First poll: the port belongs to PID 100.
-	first := a.join(
-		map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)},
-		map[uint16]procinfo.Process{51000: {PID: 100, Name: "old"}},
-		now,
-	)
-	if got := recordFor(t, first, "140.82.112.3", 443); got.PID != 100 {
-		t.Fatalf("first join attributed PID %d, want 100", got.PID)
-	}
-
-	// Second poll: the same local port now belongs to PID 200. The remembered
-	// attribution must lose to the fresh one, and the two processes' traffic
-	// must not be merged into two rows sharing the same bytes.
+	// The socket is gone from the next poll (the connection closed), but
+	// within GracePeriod it must stay on screen, dimmed.
 	later := now.Add(time.Second)
-	second := a.join(
-		map[capture.FlowKey]capture.FlowStats{key: stats(3000, 700, later)},
-		map[uint16]procinfo.Process{51000: {PID: 200, Name: "new"}},
-		later,
-	)
-
-	if len(second.Connections) != 1 {
-		t.Fatalf("second join produced %d records, want 1", len(second.Connections))
+	snap := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, later)
+	if len(snap.Connections) != 1 {
+		t.Fatalf("join() produced %d records, want 1 (still within grace period)", len(snap.Connections))
 	}
-	got := recordFor(t, second, "140.82.112.3", 443)
-	if got.PID != 200 || got.ProcessName != "new" {
-		t.Errorf("reused port attributed to (%d, %q), want (200, \"new\")", got.PID, got.ProcessName)
+	got := recordFor(t, snap, "1.1.1.1", 53)
+	if !got.Vanished {
+		t.Error("connection missing from the poll does not report Vanished")
 	}
-
-	rows := ByProcess(second)
-	if len(rows) != 1 {
-		t.Fatalf("ByProcess() produced %d rows, want 1 — the old PID must not survive", len(rows))
+	if !got.Closed(later) {
+		t.Error("a vanished connection does not report Closed")
 	}
-	if rows[0].Key != "200" || rows[0].BytesInTotal != 3000 || rows[0].Connections != 1 {
-		t.Errorf("row = %+v, want key 200 with 3000 bytes in over 1 connection", rows[0])
-	}
-}
-
-func TestJoinKeepsLastKnownProcessWhileConnectionCloses(t *testing.T) {
-	a := New(nil, nil)
-	now := time.Now()
-
-	key := flow(t, 51000, "140.82.112.3", 443)
-	a.join(
-		map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)},
-		map[uint16]procinfo.Process{51000: {PID: 100, Name: "curl"}},
-		now,
-	)
-
-	// The process has exited, so the port is gone from the poll — but the
-	// connection is still inside its grace period and should keep its name
-	// rather than flipping to "unknown" on the way out.
-	later := now.Add(time.Second)
-	snap := a.join(
-		map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)},
-		map[uint16]procinfo.Process{},
-		later,
-	)
-
-	got := recordFor(t, snap, "140.82.112.3", 443)
-	if got.PID != 100 || got.ProcessName != "curl" {
-		t.Errorf("record after process exit = (%d, %q), want (100, \"curl\")", got.PID, got.ProcessName)
-	}
-}
-
-func TestJoinKeepsUnknownTrafficUnknown(t *testing.T) {
-	a := New(nil, nil)
-	now := time.Now()
-
-	key := flow(t, 51000, "1.1.1.1", 53)
-	flows := map[capture.FlowKey]capture.FlowStats{key: stats(10, 10, now)}
-
-	a.join(flows, map[uint16]procinfo.Process{}, now)
-
-	// A record remembered as unknown must not block a later poll from
-	// attributing the flow properly.
-	later := now.Add(time.Second)
-	snap := a.join(
-		map[capture.FlowKey]capture.FlowStats{key: stats(20, 10, later)},
-		map[uint16]procinfo.Process{51000: {PID: 7, Name: "dig"}},
-		later,
-	)
-	if got := recordFor(t, snap, "1.1.1.1", 53); got.PID != 7 {
-		t.Errorf("record = PID %d, want 7 once the poll caught up", got.PID)
-	}
-}
-
-func TestJoinMarksQuietConnectionsClosedThenEvictsThem(t *testing.T) {
-	a := New(nil, nil)
-	now := time.Now()
-
-	key := flow(t, 51000, "140.82.112.3", 443)
-	flows := map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)}
-	ports := map[uint16]procinfo.Process{51000: {PID: 42, Name: "curl"}}
-
-	fresh := a.join(flows, ports, now)
-	if recordFor(t, fresh, "140.82.112.3", 443).Closed(now) {
-		t.Error("a connection seen this instant reports Closed")
-	}
-	if ByProcess(fresh)[0].Closed(now) {
-		t.Error("a row with live traffic reports Closed")
+	if got.PID != 42 || got.ProcessName != "dig" {
+		t.Errorf("vanished record = (%d, %q), want (42, \"dig\") retained from the last poll", got.PID, got.ProcessName)
 	}
 
-	// Quiet for longer than IdleThreshold but still inside the grace period:
-	// the row stays, dimmed.
-	quiet := now.Add(IdleThreshold + time.Second)
-	dimmed := a.join(flows, ports, quiet)
-	if len(dimmed.Connections) != 1 {
-		t.Fatalf("quiet connection dropped after %s, want it retained until GracePeriod", IdleThreshold+time.Second)
-	}
-	if !dimmed.Connections[0].Closed(quiet) {
-		t.Error("quiet connection does not report Closed")
-	}
-	if !ByProcess(dimmed)[0].Closed(quiet) {
-		t.Error("row of quiet connections does not report Closed")
-	}
-
-	// Past the grace period it is evicted entirely.
-	gone := now.Add(GracePeriod + time.Second)
-	evicted := a.join(flows, ports, gone)
+	// Past the grace period it is dropped for good.
+	gone := now.Add(GracePeriod + time.Nanosecond)
+	evicted := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, gone)
 	if len(evicted.Connections) != 0 {
-		t.Errorf("connection survived %s past last activity: %+v", GracePeriod+time.Second, evicted.Connections)
+		t.Errorf("vanished connection survived past GracePeriod: %+v", evicted.Connections)
 	}
 	if len(a.records) != 0 {
 		t.Errorf("evicted connection left %d retained records", len(a.records))
 	}
 }
 
+func TestJoinShowsUnattributedICMPAndARPFlows(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	icmpKey := capture.FlowKey{
+		LocalAddr: mustAddr(t, localAddr), RemoteAddr: mustAddr(t, "1.1.1.1"), Proto: capture.ProtoICMP,
+	}
+	arpKey := capture.FlowKey{
+		LocalAddr: mustAddr(t, localAddr), RemoteAddr: mustAddr(t, "192.168.1.1"), Proto: capture.ProtoARP,
+	}
+	flows := map[capture.FlowKey]capture.FlowStats{
+		icmpKey: stats(100, 0, now),
+		arpKey:  stats(0, 28, now),
+	}
+
+	// No procinfo connections at all: neither flow has a socket, so nothing
+	// but the capture side attributes them.
+	snap := a.join(nil, flows, now)
+	if len(snap.Connections) != 2 {
+		t.Fatalf("join() produced %d records, want 2 (icmp + arp)", len(snap.Connections))
+	}
+
+	icmp := recordFor(t, snap, "1.1.1.1", 0)
+	if icmp.PID != 0 || icmp.ProcessName != unattributedProcessLabel || icmp.Proto != "icmp" {
+		t.Errorf("icmp record = %+v, want PID 0, ProcessName %q, Proto \"icmp\"", icmp, unattributedProcessLabel)
+	}
+	if icmp.BytesInTotal != 100 {
+		t.Errorf("icmp record BytesInTotal = %d, want 100", icmp.BytesInTotal)
+	}
+
+	arp := recordFor(t, snap, "192.168.1.1", 0)
+	if arp.PID != 0 || arp.ProcessName != unattributedProcessLabel || arp.Proto != "arp" {
+		t.Errorf("arp record = %+v, want PID 0, ProcessName %q, Proto \"arp\"", arp, unattributedProcessLabel)
+	}
+
+	// Once the flow is gone from capture (evicted), the grace-period
+	// carry-forward already generic to every protocol picks it up: it stays
+	// dimmed for one more tick, then drops entirely.
+	later := now.Add(time.Second)
+	still := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, later)
+	stillICMP := recordFor(t, still, "1.1.1.1", 0)
+	if !stillICMP.Vanished {
+		t.Error("icmp flow missing from capture does not report Vanished")
+	}
+
+	gone := now.Add(GracePeriod + time.Nanosecond)
+	evicted := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, gone)
+	if len(evicted.Connections) != 0 {
+		t.Errorf("unattributed flows survived past GracePeriod: %+v", evicted.Connections)
+	}
+}
+
+func TestJoinRetainsVanishedConnectionAtExactlyGracePeriod(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	c := conn(t, 42, "curl", 51000, "140.82.112.3", 443)
+	a.join([]procinfo.Connection{c}, map[capture.FlowKey]capture.FlowStats{}, now)
+
+	atBoundary := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, now.Add(GracePeriod))
+	if len(atBoundary.Connections) != 1 {
+		t.Error("vanished connection evicted at exactly GracePeriod, want retained (the eviction check is a strict Before)")
+	}
+
+	pastBoundary := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, now.Add(GracePeriod+time.Nanosecond))
+	if len(pastBoundary.Connections) != 0 {
+		t.Error("vanished connection survived just past GracePeriod, want evicted")
+	}
+}
+
+func TestJoinReplacesPreviousBandwidthOnceReattributed(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	c := conn(t, 100, "old", 51000, "140.82.112.3", 443)
+	first := a.join([]procinfo.Connection{c}, map[capture.FlowKey]capture.FlowStats{flowFor(c): stats(1000, 500, now)}, now)
+	if got := recordFor(t, first, "140.82.112.3", 443); got.PID != 100 {
+		t.Fatalf("first join reported PID %d, want 100", got.PID)
+	}
+
+	// The old connection has closed and a different process now holds the
+	// same local port, connected elsewhere: it is a distinct connection, not
+	// a continuation of the first, and must not inherit its bandwidth. The
+	// old one still shows up once more, vanished, within its own grace
+	// period.
+	later := now.Add(time.Second)
+	c2 := conn(t, 200, "new", 51000, "8.8.8.8", 443)
+	second := a.join([]procinfo.Connection{c2}, map[capture.FlowKey]capture.FlowStats{flowFor(c2): stats(3000, 700, later)}, later)
+
+	if len(second.Connections) != 2 {
+		t.Fatalf("second join produced %d records, want 2 (the new connection, plus the old one vanished)", len(second.Connections))
+	}
+	got := recordFor(t, second, "8.8.8.8", 443)
+	if got.PID != 200 || got.ProcessName != "new" || got.BytesInTotal != 3000 {
+		t.Errorf("reused port record = %+v, want PID 200 \"new\" with 3000 bytes in", got)
+	}
+	old := recordFor(t, second, "140.82.112.3", 443)
+	if !old.Vanished || old.PID != 100 {
+		t.Errorf("old connection = %+v, want PID 100 and Vanished", old)
+	}
+}
+
+func TestJoinMarksQuietUDPConnectionsClosedThenEvictsThem(t *testing.T) {
+	a := New(nil, nil)
+	now := time.Now()
+
+	c := procinfo.Connection{
+		PID: 42, ProcessName: "curl",
+		LocalAddr: mustAddr(t, localAddr), LocalPort: 51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"), RemotePort: 443,
+		Proto: "udp",
+	}
+	flows := map[capture.FlowKey]capture.FlowStats{flowFor(c): stats(1000, 500, now)}
+
+	fresh := a.join([]procinfo.Connection{c}, flows, now)
+	if recordFor(t, fresh, "140.82.112.3", 443).Closed(now) {
+		t.Error("a UDP connection seen this instant reports Closed")
+	}
+	if Rows(fresh, GroupNone)[0].Closed(now) {
+		t.Error("a row with live traffic reports Closed")
+	}
+
+	// Quiet for longer than IdleThreshold, but the socket is still being
+	// polled, so it stays — dimmed, not vanished.
+	quiet := now.Add(IdleThreshold + time.Second)
+	dimmed := a.join([]procinfo.Connection{c}, flows, quiet)
+	if len(dimmed.Connections) != 1 {
+		t.Fatalf("quiet connection dropped, want it retained (still open, just idle)")
+	}
+	if !dimmed.Connections[0].Closed(quiet) {
+		t.Error("quiet UDP connection does not report Closed")
+	}
+	if dimmed.Connections[0].Vanished {
+		t.Error("a still-open, merely idle connection reports Vanished")
+	}
+
+	// Once it actually vanishes from the poll, it is retained (dimmed) only
+	// for GracePeriod.
+	gone := quiet.Add(GracePeriod + time.Nanosecond)
+	evicted := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, gone)
+	if len(evicted.Connections) != 0 {
+		t.Errorf("connection survived %s past vanishing: %+v", GracePeriod+time.Nanosecond, evicted.Connections)
+	}
+}
+
 // TestClosedIsExclusiveOfIdleThreshold pins down the boundary of the `>` in
 // Closed: exactly IdleThreshold quiet must still read as open, and one tick
-// past must flip.
+// past must flip. Both use a no-state (UDP) record, since a TCP record's
+// Closed reads its State instead.
 func TestClosedIsExclusiveOfIdleThreshold(t *testing.T) {
 	lastSeen := time.Now()
 	record := ConnectionRecord{LastSeen: lastSeen}
@@ -317,134 +367,186 @@ func TestClosedIsExclusiveOfIdleThreshold(t *testing.T) {
 	}
 }
 
-// TestJoinRetainsConnectionAtExactlyGracePeriod pins down the boundary of the
-// eviction check's strict Before: a connection exactly GracePeriod old must
-// survive one more refresh, and only age out the tick after.
-func TestJoinRetainsConnectionAtExactlyGracePeriod(t *testing.T) {
-	a := New(nil, nil)
+// TestClosedReadsTCPState covers every branch of closingTCPState via
+// ConnectionRecord.Closed, independent of traffic or vanishing.
+func TestClosedReadsTCPState(t *testing.T) {
 	now := time.Now()
-
-	key := flow(t, 51000, "140.82.112.3", 443)
-	flows := map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)}
-	ports := map[uint16]procinfo.Process{51000: {PID: 42, Name: "curl"}}
-	a.join(flows, ports, now)
-
-	atBoundary := a.join(flows, ports, now.Add(GracePeriod))
-	if len(atBoundary.Connections) != 1 {
-		t.Error("connection evicted at exactly GracePeriod, want retained (the eviction check is a strict Before)")
+	tests := []struct {
+		state string
+		want  bool
+	}{
+		{"ESTABLISHED", false},
+		{"LISTEN", false},
+		{"SYN_SENT", false},
+		{"SYN_RCVD", false},
+		{"CLOSE_WAIT", true},
+		{"LAST_ACK", true},
+		{"CLOSING", true},
+		{"TIME_WAIT", true},
+		{"FIN_WAIT_1", true},
+		{"FIN_WAIT_2", true},
+		{"CLOSED", true},
 	}
-
-	pastBoundary := a.join(flows, ports, now.Add(GracePeriod+time.Nanosecond))
-	if len(pastBoundary.Connections) != 0 {
-		t.Error("connection survived just past GracePeriod, want evicted")
+	for _, tc := range tests {
+		t.Run(tc.state, func(t *testing.T) {
+			r := ConnectionRecord{State: tc.state, LastPolled: now}
+			if got := r.Closed(now); got != tc.want {
+				t.Errorf("Closed() with State %q = %v, want %v", tc.state, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestJoinForgetsFlowsTheCapturerHasDropped(t *testing.T) {
+func TestJoinForgetsConnectionsCaptureHasDropped(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
 
-	key := flow(t, 51000, "140.82.112.3", 443)
-	a.join(
-		map[capture.FlowKey]capture.FlowStats{key: stats(1000, 500, now)},
-		map[uint16]procinfo.Process{51000: {PID: 42, Name: "curl"}},
-		now,
-	)
+	c := conn(t, 42, "curl", 51000, "140.82.112.3", 443)
+	a.join([]procinfo.Connection{c}, map[capture.FlowKey]capture.FlowStats{flowFor(c): stats(1000, 500, now)}, now)
 
-	// Retention must not resurrect a flow the capture side no longer reports.
-	snap := a.join(map[capture.FlowKey]capture.FlowStats{}, map[uint16]procinfo.Process{}, now)
+	// The socket itself is gone and grace has elapsed: nothing left to show,
+	// and nothing left retained.
+	snap := a.join(nil, map[capture.FlowKey]capture.FlowStats{}, now.Add(GracePeriod+time.Nanosecond))
 	if len(snap.Connections) != 0 || len(a.records) != 0 {
-		t.Errorf("dropped flow survived: %d records, %d retained", len(snap.Connections), len(a.records))
+		t.Errorf("connection survived past grace: %d records, %d retained", len(snap.Connections), len(a.records))
 	}
 }
 
-// twoProcessSnapshot builds a snapshot spanning two processes and three
+// multiConnSnapshot builds a snapshot spanning two processes and three
 // destinations, two of which share a remote IP on different ports.
-func twoProcessSnapshot(now time.Time) Snapshot {
+func multiConnSnapshot(now time.Time) Snapshot {
 	return Snapshot{
 		At: now,
 		Connections: []ConnectionRecord{
-			{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443,
+			{PID: 42, ProcessName: "curl", LocalAddr: localAddr, LocalPort: 51000, RemoteAddr: "140.82.112.3", RemotePort: 443, Proto: "tcp",
 				BytesInTotal: 1000, BytesOutTotal: 100, RateInBps: 200, RateOutBps: 20, LastSeen: now.Add(-time.Second)},
-			{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 80,
+			{PID: 42, ProcessName: "curl", LocalAddr: localAddr, LocalPort: 51001, RemoteAddr: "140.82.112.3", RemotePort: 80, Proto: "tcp",
 				BytesInTotal: 2000, BytesOutTotal: 200, RateInBps: 400, RateOutBps: 40, LastSeen: now},
-			{PID: 7, ProcessName: "dig", RemoteAddr: "1.1.1.1", RemotePort: 53,
+			{PID: 7, ProcessName: "dig", LocalAddr: localAddr, LocalPort: 51002, RemoteAddr: "1.1.1.1", RemotePort: 53, Proto: "udp",
 				BytesInTotal: 30, BytesOutTotal: 3, RateInBps: 6, RateOutBps: 1, LastSeen: now.Add(-2 * time.Second)},
 		},
 	}
 }
 
-func TestByProcessSumsCountersPerPID(t *testing.T) {
+func TestRowsUngroupedIsOnePerConnection(t *testing.T) {
 	now := time.Now()
-	rows := ByProcess(twoProcessSnapshot(now))
+	rows := Rows(multiConnSnapshot(now), GroupNone)
 
-	if len(rows) != 2 {
-		t.Fatalf("ByProcess() produced %d rows, want 2", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("Rows(GroupNone) produced %d rows, want 3", len(rows))
+	}
+	for _, r := range rows {
+		if r.Connections != 1 {
+			t.Errorf("row %+v has Connections = %d, want 1", r, r.Connections)
+		}
+		if r.RemoteAddr == "" || r.LocalAddr == "" {
+			t.Errorf("row %+v missing local/remote address", r)
+		}
+	}
+}
+
+func TestRowsByPIDSumsCountersPerProcess(t *testing.T) {
+	now := time.Now()
+	rows := Rows(multiConnSnapshot(now), GroupByPID)
+
+	// curl's two connections go to different remote ports, so grouping by
+	// PID and remote endpoint keeps them apart; only dig's lone connection
+	// gets a row of its own too, for 3 rows total.
+	if len(rows) != 3 {
+		t.Fatalf("Rows(GroupByPID) produced %d rows, want 3", len(rows))
 	}
 
-	curl := rowFor(t, rows, "42")
-	if curl.Label != "curl" || curl.PID != 42 {
-		t.Errorf("row = (%q, %d), want (\"curl\", 42)", curl.Label, curl.PID)
+	curl443 := rowFor(t, rows, "42|140.82.112.3|443")
+	if curl443.Label != "curl" || curl443.PID != 42 || curl443.RemoteAddr != "140.82.112.3" || curl443.RemotePort != 443 {
+		t.Errorf("row = %+v, want curl/42 to 140.82.112.3:443", curl443)
 	}
-	if curl.BytesInTotal != 3000 || curl.BytesOutTotal != 300 {
-		t.Errorf("totals = (%d, %d), want (3000, 300)", curl.BytesInTotal, curl.BytesOutTotal)
-	}
-	if curl.RateInBps != 600 || curl.RateOutBps != 60 {
-		t.Errorf("rates = (%.1f, %.1f), want (600, 60)", curl.RateInBps, curl.RateOutBps)
-	}
-	if curl.Connections != 2 {
-		t.Errorf("Connections = %d, want 2", curl.Connections)
-	}
-	// LastSeen is the newest of the row's connections, so one live connection
-	// keeps the row lit.
-	if !curl.LastSeen.Equal(now) {
-		t.Errorf("LastSeen = %s, want the newest connection's %s", curl.LastSeen, now)
+	if curl443.BytesInTotal != 1000 || curl443.BytesOutTotal != 100 || curl443.Connections != 1 {
+		t.Errorf("row = %+v, want 1000/100 bytes over 1 connection", curl443)
 	}
 
-	dig := rowFor(t, rows, "7")
+	curl80 := rowFor(t, rows, "42|140.82.112.3|80")
+	if curl80.BytesInTotal != 2000 || curl80.BytesOutTotal != 200 || curl80.Connections != 1 {
+		t.Errorf("row = %+v, want 2000/200 bytes over 1 connection", curl80)
+	}
+	// A grouped row can't state a single State, so it is left blank even
+	// though RemoteAddr and RemotePort now carry over exactly.
+	if curl80.State != "" {
+		t.Errorf("GroupByPID row = %+v, want State left blank", curl80)
+	}
+
+	dig := rowFor(t, rows, "7|1.1.1.1|53")
 	if dig.Connections != 1 || dig.BytesInTotal != 30 {
 		t.Errorf("dig row = %+v, want 1 connection and 30 bytes in", dig)
 	}
 }
 
-func TestByDestinationGranularityChangesRowCount(t *testing.T) {
+func TestRowsByPIDMergesConnectionsToTheSameDestination(t *testing.T) {
 	now := time.Now()
-	snap := twoProcessSnapshot(now)
+	snap := Snapshot{Connections: []ConnectionRecord{
+		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 1000, LastSeen: now},
+		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 2000, LastSeen: now},
+	}}
 
-	byIP := ByDestination(snap, GroupByIP)
-	if len(byIP) != 2 {
-		t.Fatalf("GroupByIP produced %d rows, want 2", len(byIP))
+	rows := Rows(snap, GroupByPID)
+	if len(rows) != 1 {
+		t.Fatalf("Rows(GroupByPID) produced %d rows, want 1 (same PID, same destination)", len(rows))
 	}
-	gh := rowFor(t, byIP, "140.82.112.3")
-	if gh.Label != "140.82.112.3" || gh.RemoteAddr != "140.82.112.3" || gh.RemotePort != 0 {
-		t.Errorf("GroupByIP row = %+v, want the bare IP and no port", gh)
-	}
-	if gh.BytesInTotal != 3000 || gh.Connections != 2 {
-		t.Errorf("GroupByIP row = %+v, want 3000 bytes in over 2 connections", gh)
-	}
-
-	byIPPort := ByDestination(snap, GroupByIPPort)
-	if len(byIPPort) != 3 {
-		t.Fatalf("GroupByIPPort produced %d rows, want 3 — each port is its own row", len(byIPPort))
-	}
-	https := rowFor(t, byIPPort, "140.82.112.3:443")
-	if https.RemoteAddr != "140.82.112.3" || https.RemotePort != 443 {
-		t.Errorf("GroupByIPPort row = %+v, want the address and port split out", https)
-	}
-	if https.BytesInTotal != 1000 || https.Connections != 1 {
-		t.Errorf("GroupByIPPort row = %+v, want 1000 bytes in over 1 connection", https)
+	if got := rows[0]; got.Connections != 2 || got.BytesInTotal != 3000 {
+		t.Errorf("row = %+v, want 2 connections and 3000 bytes in", got)
 	}
 }
 
-func TestByDestinationBracketsIPv6(t *testing.T) {
+func TestRowsByProcessNameGroupsAcrossPIDs(t *testing.T) {
 	now := time.Now()
 	snap := Snapshot{Connections: []ConnectionRecord{
-		{PID: 1, RemoteAddr: "2606:4700::1111", RemotePort: 443, LastSeen: now},
+		{PID: 100, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 10, LastSeen: now},
+		{PID: 200, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 20, LastSeen: now},
 	}}
 
-	// Keys must stay parseable, which for IPv6 means bracketing the address.
-	if got := ByDestination(snap, GroupByIPPort)[0].Key; got != "[2606:4700::1111]:443" {
-		t.Errorf("IPv6 destination key = %q, want %q", got, "[2606:4700::1111]:443")
+	rows := Rows(snap, GroupByProcessName)
+	if len(rows) != 1 {
+		t.Fatalf("Rows(GroupByProcessName) produced %d rows, want 1 (two PIDs, same destination)", len(rows))
+	}
+	got := rows[0]
+	if got.Label != "chrome" || got.PID != 0 || got.LocalAddr != "" {
+		t.Errorf("row = %+v, want label \"chrome\" with PID and LocalAddr left blank (spans two PIDs)", got)
+	}
+	if got.RemoteAddr != "1.1.1.1" || got.RemotePort != 443 {
+		t.Errorf("row = %+v, want the shared remote endpoint carried over", got)
+	}
+	if got.BytesInTotal != 30 || got.Connections != 2 {
+		t.Errorf("row = %+v, want 30 bytes in over 2 connections", got)
+	}
+}
+
+// TestRowsByProcessNameSplitsByDestination shows the other half of grouping
+// by process name: two PIDs sharing a name but talking to different
+// destinations get one row each.
+func TestRowsByProcessNameSplitsByDestination(t *testing.T) {
+	now := time.Now()
+	snap := Snapshot{Connections: []ConnectionRecord{
+		{PID: 100, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 10, LastSeen: now},
+		{PID: 200, ProcessName: "chrome", RemoteAddr: "2.2.2.2", RemotePort: 443, BytesInTotal: 20, LastSeen: now},
+	}}
+
+	rows := Rows(snap, GroupByProcessName)
+	if len(rows) != 2 {
+		t.Fatalf("Rows(GroupByProcessName) produced %d rows, want 2 (different destinations)", len(rows))
+	}
+}
+
+func TestGroupingCyclesThroughAllThreeModes(t *testing.T) {
+	seen := map[Grouping]bool{}
+	g := GroupNone
+	for range 3 {
+		seen[g] = true
+		g = g.Next()
+	}
+	if g != GroupNone {
+		t.Errorf("Grouping.Next() after 3 steps = %v, want back at GroupNone", g)
+	}
+	if !seen[GroupNone] || !seen[GroupByPID] || !seen[GroupByProcessName] {
+		t.Errorf("cycle visited %v, want all three groupings", seen)
 	}
 }
 
@@ -452,37 +554,32 @@ func TestRowKeysAreStableAcrossRefreshes(t *testing.T) {
 	a := New(nil, nil)
 	now := time.Now()
 
-	keyA := flow(t, 51000, "140.82.112.3", 443)
-	keyB := flow(t, 51001, "1.1.1.1", 53)
-	ports := map[uint16]procinfo.Process{
-		51000: {PID: 42, Name: "curl"},
-		51001: {PID: 7, Name: "dig"},
-	}
+	cA := conn(t, 42, "curl", 51000, "140.82.112.3", 443)
+	cB := conn(t, 7, "dig", 51001, "1.1.1.1", 53)
 
-	first := a.join(map[capture.FlowKey]capture.FlowStats{
-		keyA: stats(1000, 100, now),
-		keyB: stats(10, 5, now),
-	}, ports, now)
+	first := a.join([]procinfo.Connection{cA, cB}, map[capture.FlowKey]capture.FlowStats{
+		flowFor(cA): stats(1000, 100, now),
+		flowFor(cB): stats(10, 5, now),
+	}, now)
 
 	// The second refresh reverses the traffic ranking, which is what would
 	// reorder the rendered rows — the keys must not move with it.
 	later := now.Add(time.Second)
-	second := a.join(map[capture.FlowKey]capture.FlowStats{
-		keyA: stats(1100, 110, later),
-		keyB: stats(90000, 5, later),
-	}, ports, later)
+	second := a.join([]procinfo.Connection{cA, cB}, map[capture.FlowKey]capture.FlowStats{
+		flowFor(cA): stats(1100, 110, later),
+		flowFor(cB): stats(90000, 5, later),
+	}, later)
 
 	for _, tc := range []struct {
 		name       string
-		rows       func(Snapshot) []Row
+		g          Grouping
 		wantSorted []string
 	}{
-		{"ByProcess", ByProcess, []string{"7", "42"}},
-		{"ByDestinationIP", func(s Snapshot) []Row { return ByDestination(s, GroupByIP) }, []string{"1.1.1.1", "140.82.112.3"}},
-		{"ByDestinationIPPort", func(s Snapshot) []Row { return ByDestination(s, GroupByIPPort) }, []string{"1.1.1.1:53", "140.82.112.3:443"}},
+		{"GroupByPID", GroupByPID, []string{"7|1.1.1.1|53", "42|140.82.112.3|443"}},
+		{"GroupByProcessName", GroupByProcessName, []string{"curl|140.82.112.3|443", "dig|1.1.1.1|53"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			before, after := rowKeys(tc.rows(first)), rowKeys(tc.rows(second))
+			before, after := rowKeys(Rows(first, tc.g)), rowKeys(Rows(second, tc.g))
 			if len(before) != len(after) {
 				t.Fatalf("row count changed: %v then %v", before, after)
 			}
@@ -492,42 +589,6 @@ func TestRowKeysAreStableAcrossRefreshes(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestFilterByProcessKeepsOnlyThatPID(t *testing.T) {
-	now := time.Now()
-	snap := twoProcessSnapshot(now)
-
-	got := FilterByProcess(snap, 42)
-	if len(got.Connections) != 2 {
-		t.Fatalf("FilterByProcess(42) kept %d connections, want 2", len(got.Connections))
-	}
-	if !got.At.Equal(snap.At) {
-		t.Errorf("FilterByProcess dropped the snapshot timestamp")
-	}
-	for _, c := range got.Connections {
-		if c.PID != 42 {
-			t.Errorf("FilterByProcess(42) kept PID %d", c.PID)
-		}
-	}
-	if len(FilterByProcess(snap, 999).Connections) != 0 {
-		t.Error("FilterByProcess kept connections for a PID that has none")
-	}
-}
-
-func TestFilterByDestinationHonoursGrouping(t *testing.T) {
-	now := time.Now()
-	snap := twoProcessSnapshot(now)
-
-	// Grouped by IP the port is ignored, so both of the host's ports survive.
-	if got := FilterByDestination(snap, "140.82.112.3", 0, GroupByIP); len(got.Connections) != 2 {
-		t.Errorf("FilterByDestination without port kept %d connections, want 2", len(got.Connections))
-	}
-	// Grouped by IP:port only the matching port survives.
-	got := FilterByDestination(snap, "140.82.112.3", 443, GroupByIPPort)
-	if len(got.Connections) != 1 || got.Connections[0].RemotePort != 443 {
-		t.Errorf("FilterByDestination with port kept %+v, want only port 443", got.Connections)
 	}
 }
 
@@ -554,10 +615,10 @@ func TestAggregatorRefreshIsSafeForConcurrentUse(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				a.Refresh(time.Now())
 			}
 		}()
@@ -565,45 +626,45 @@ func TestAggregatorRefreshIsSafeForConcurrentUse(t *testing.T) {
 	wg.Wait()
 }
 
-// benchmarkFlows builds n synthetic flows spread over 50 PIDs and 20 remote
-// hosts, plus the port map attributing them, for BenchmarkJoin and
+// benchmarkConns builds n synthetic open connections spread over 50 PIDs and
+// 20 remote hosts, plus the flow stats for each, for BenchmarkJoin and
 // BenchmarkRollup.
-func benchmarkFlows(b *testing.B, n int) (map[capture.FlowKey]capture.FlowStats, map[uint16]procinfo.Process) {
+func benchmarkConns(b *testing.B, n int) ([]procinfo.Connection, map[capture.FlowKey]capture.FlowStats) {
 	b.Helper()
 
 	now := time.Now()
+	conns := make([]procinfo.Connection, 0, n)
 	flows := make(map[capture.FlowKey]capture.FlowStats, n)
-	ports := make(map[uint16]procinfo.Process, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		localPort := uint16(1024 + i)
 		remote := fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256)
-		key := flow(b, localPort, remote, uint16(1+i%1000))
-		flows[key] = stats(uint64(1000+i), uint64(500+i), now)
-		ports[localPort] = procinfo.Process{PID: int32(i % 50), Name: "proc"}
+		c := conn(b, int32(i%50), "proc", localPort, remote, uint16(1+i%1000))
+		conns = append(conns, c)
+		flows[flowFor(c)] = stats(uint64(1000+i), uint64(500+i), now)
 	}
-	return flows, ports
+	return conns, flows
 }
 
 // BenchmarkJoin exercises the aggregator's hot per-refresh-tick path.
 func BenchmarkJoin(b *testing.B) {
-	flows, ports := benchmarkFlows(b, 1000)
+	conns, flows := benchmarkConns(b, 1000)
 	a := New(nil, nil)
 	now := time.Now()
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		a.join(flows, ports, now)
+	for range b.N {
+		a.join(conns, flows, now)
 	}
 }
 
-// BenchmarkRollup exercises ByProcess's rollup of a realistic-sized snapshot.
+// BenchmarkRollup exercises Rows' rollup of a realistic-sized snapshot.
 func BenchmarkRollup(b *testing.B) {
-	flows, ports := benchmarkFlows(b, 1000)
+	conns, flows := benchmarkConns(b, 1000)
 	a := New(nil, nil)
-	snap := a.join(flows, ports, time.Now())
+	snap := a.join(conns, flows, time.Now())
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ByProcess(snap)
+	for range b.N {
+		Rows(snap, GroupByPID)
 	}
 }

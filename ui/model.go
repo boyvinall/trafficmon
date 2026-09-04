@@ -36,27 +36,12 @@ const defaultPageSize = 10
 // so a working but idle capture does not look like a broken one.
 const emptyMessage = "  (no traffic yet)"
 
-// emptyScopeMessage stands in for the table body of a drilled-in view with
-// nothing left in it — the process exited, or the host went quiet. It is
-// worded differently from emptyMessage because "no traffic yet" would be
-// plainly wrong with a busy table one esc away, and because the way out is the
-// only thing left to do here.
-const emptyScopeMessage = "  (nothing left in this view — esc to go back)"
-
 // emptyFilterMessage stands in for the table body of a view whose filter
-// matches nothing. It takes precedence over the other two: a filter is
+// matches nothing. It takes precedence over emptyMessage: a filter is
 // something the user typed a moment ago and can undo, so it is far and away
 // the likeliest explanation for an empty table, and "no traffic yet" would be
 // a flat contradiction of the header bar naming the filter that emptied it.
 const emptyFilterMessage = "  (nothing matches the filter — / to change it)"
-
-// minBreadcrumbWidth is the narrowest breadcrumb worth rendering. Below it a
-// drill path says nothing at all, so the header spends the cells on the status
-// instead.
-const minBreadcrumbWidth = 12
-
-// breadcrumbPrefix separates the drill path from the mode label it hangs off.
-const breadcrumbPrefix = "› "
 
 // filterPrompt marks the filter input, echoing the key that opened it the way
 // less and vim do, so the line reads as the thing `/` just started.
@@ -94,12 +79,9 @@ type Model struct {
 	// so the two can never drift apart from the bindings Update acts on.
 	help help.Model
 
-	// stack is a pointer, not a value, even though Model is otherwise passed
-	// and returned by value throughout: the drill-down position is logically
-	// per-session state, not per-copy, so every Model derived from the same
-	// NewModel call is meant to keep sharing it. Do not assume the rest of
-	// Model's value semantics extend to it.
-	stack    *Stack
+	// grouping controls how connections roll up into rows, cycled with `g`.
+	// The zero value, aggregate.GroupNone, is what NewModel starts with:
+	// one row per open connection.
 	grouping aggregate.Grouping
 	sort     SortKey
 
@@ -159,25 +141,35 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 		keys:     DefaultKeyMap(),
 		styles:   DefaultStyles(),
 		help:     help.New(),
-		stack:    NewStack(ModeProcess),
 		input:    input,
 	}
 }
 
-// hostname is the reverse-resolved name for a row's destination, falling back
-// to the bare address until — or unless — one is known.
+// Hostname returns the reverse-resolved name for a row's destination, falling
+// back to the bare address until — or unless — one is known.
 //
-// It is safe to call from the render loop: dns.Resolver answers from its cache
+// It is safe to call from a render loop: dns.Resolver answers from its cache
 // and starts anything it is missing in the background, so a frame is never
-// held up by a query. A newly resolved name therefore appears on the next tick
-// rather than the moment it lands, which is the whole point: the table redraws
-// every second anyway, so there is nothing for a notification to make happen
-// sooner than the frame that was coming regardless.
-func (m Model) hostname(r aggregate.Row) string {
-	if r.RemoteAddr == "" || m.resolver == nil {
+// held up by a query. A newly resolved name therefore appears on the next
+// refresh rather than the moment it lands, which is the whole point: the
+// table redraws every second anyway, so there is nothing for a notification
+// to make happen sooner than the frame that was coming regardless.
+//
+// It is a package-level function, not just a Model method, so the plain-mode
+// renderer can name destinations exactly the way the interactive table does
+// without needing a Model of its own — see Model.hostname, its bound form,
+// and RenderPlain, its other caller.
+func Hostname(ctx context.Context, res *dns.Resolver, r aggregate.Row) string {
+	if r.RemoteAddr == "" || res == nil {
 		return r.RemoteAddr
 	}
-	return m.resolver.Lookup(m.ctx, r.RemoteAddr)
+	return res.Lookup(ctx, r.RemoteAddr)
+}
+
+// hostname is Hostname bound to the resolver and context this Model was built
+// with, which is the form the table columns and the filter call it in.
+func (m Model) hostname(r aggregate.Row) string {
+	return Hostname(m.ctx, m.resolver, r)
 }
 
 // Init starts the render ticker.
@@ -226,16 +218,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// While the help overlay has the screen, it claims the keyboard the same
-	// way: everything a normal keypress would act on — the cursor, mode,
-	// grouping, the filter — is out of sight underneath it, so only leaving
-	// the program or closing the overlay make sense. Back is included because
-	// it is Esc or Backspace, and either should dismiss help rather than
-	// falling through to drill out of whatever scope sits under it.
+	// way: everything a normal keypress would act on — the cursor, grouping,
+	// the filter — is out of sight underneath it, so only leaving the program
+	// or closing the overlay make sense. Esc is handled as a raw key type
+	// rather than through the KeyMap, the same way the filter input handles
+	// it: there is nothing left for it to mean at the table level.
 	if m.showHelp {
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
-		case key.Matches(msg, m.keys.Help), key.Matches(msg, m.keys.Back):
+		case key.Matches(msg, m.keys.Help), msg.Type == tea.KeyEsc:
 			m.showHelp = false
 		}
 		return m, nil
@@ -258,15 +250,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.End):
 		m.moveCursor(len(m.rows))
 
-	case key.Matches(msg, m.keys.Mode):
-		m.toggleMode()
 	case key.Matches(msg, m.keys.Grouping):
-		m.toggleGrouping()
-
-	case key.Matches(msg, m.keys.Enter):
-		m.drillIn()
-	case key.Matches(msg, m.keys.Back):
-		m.drillOut()
+		m.cycleGrouping()
 
 	// `s` walks the whole cycle and `r` jumps straight between the two
 	// bandwidth sorts the plan singles out; both land on the same SortKey, so
@@ -388,92 +373,10 @@ func (m Model) pageSize() int {
 	return defaultPageSize
 }
 
-// toggleMode swaps the top-level view between processes and destinations.
-//
-// It does nothing once the user has drilled in. Tab means "show me the other
-// top-level view", and inside a drill-down the other view of the same scope is
-// exactly what Enter already offers; silently unwinding the drill path on a
-// key that normally does something small would throw away navigation the user
-// did deliberately. Esc is the way back out, and footerKeys stops offering tab
-// at depth so the key is not advertised where it has no effect.
-func (m *Model) toggleMode() {
-	if m.stack.Depth() > 0 {
-		return
-	}
-
-	if m.stack.Top().Mode == ModeProcess {
-		m.stack.SetMode(ModeDestination)
-	} else {
-		m.stack.SetMode(ModeProcess)
-	}
-	m.resetRows()
-	m.rebuild()
-}
-
-// toggleGrouping switches the by-destination view between one row per remote
-// IP and one per remote IP:port. The by-process view has no destinations to
-// group, so there it is a no-op rather than a change that only shows up later.
-func (m *Model) toggleGrouping() {
-	if m.stack.Top().Mode != ModeDestination {
-		return
-	}
-
-	if m.grouping == aggregate.GroupByIP {
-		m.grouping = aggregate.GroupByIPPort
-	} else {
-		m.grouping = aggregate.GroupByIP
-	}
-	m.resetRows()
-	m.rebuild()
-}
-
-// drillIn opens the selected row in the opposite view, scoped to it: a process
-// row leads to that process's destinations, a destination row to the processes
-// talking to it. It is the enter half of the drill-down stack.
-//
-// The cursor is reset rather than carried over, because the rows either side
-// of the drill are not the same kind of thing — the row the user was pointing
-// at does not exist in the view they land in — so there is no selection to
-// preserve and holding the index would land them somewhere arbitrary.
-func (m *Model) drillIn() {
-	// An empty table has nothing to drill into, and the cursor is allowed to
-	// sit outside the rows — no selection at all is a state the view renders
-	// quite happily — so neither can be assumed away here.
-	if m.cursor < 0 || m.cursor >= len(m.rows) {
-		return
-	}
-
-	var f Frame
-	switch m.stack.Top().Mode {
-	case ModeProcess:
-		f = processFrame(m.rows[m.cursor])
-	case ModeDestination:
-		f = destinationFrame(m.rows[m.cursor], m.grouping)
-	}
-
-	// Drilling into a scope the stack already carries would add a level
-	// showing the rows underneath it unchanged. See Stack.HasScope.
-	if m.stack.HasScope(f.Scope) {
-		return
-	}
-
-	m.stack.Push(f)
-	m.resetRows()
-	m.rebuild()
-}
-
-// drillOut pops back to the view the user drilled down from.
-//
-// At the top level there is nothing to pop and it does nothing at all: the
-// footer does not offer esc there, and leaving the key unclaimed at depth 0 is
-// what lets milestone 7 give it the "cancel the filter input" meaning without
-// having to take it off the drill-down stack first.
-func (m *Model) drillOut() {
-	if m.stack.Depth() == 0 {
-		return
-	}
-
-	m.stack.Pop()
+// cycleGrouping advances the grouping to the next of the three states —
+// ungrouped, by PID, by process name — wrapping back round to ungrouped.
+func (m *Model) cycleGrouping() {
+	m.grouping = m.grouping.Next()
 	m.resetRows()
 	m.rebuild()
 }
@@ -504,23 +407,14 @@ func (m *Model) refresh(now time.Time) {
 //
 // It never asks the aggregator for fresh data: Refresh recomputes rates
 // against a newer clock and ages rows out, which is precisely what pause
-// exists to prevent, so a mode or sort change made while paused must be able
-// to redraw the frozen data rather than thaw it.
+// exists to prevent, so a grouping or sort change made while paused must be
+// able to redraw the frozen data rather than thaw it.
 //
 // Taking the rows apart from where they came from is also what lets the parts
 // with all the subtlety in them — the filter, the sort and the cursor — be
 // exercised with hand-built inputs, no live capture and no root.
 func (m *Model) rebuild() {
-	snap := m.stack.Apply(m.snap)
-
-	var rows []aggregate.Row
-	switch m.stack.Top().Mode {
-	case ModeProcess:
-		rows = aggregate.ByProcess(snap)
-	case ModeDestination:
-		rows = aggregate.ByDestination(snap, m.grouping)
-	}
-
+	rows := aggregate.Rows(m.snap, m.grouping)
 	rows = filterRows(rows, m.filter, m.hostname)
 	sortRows(rows, m.sort)
 	m.setRows(rows)
@@ -615,12 +509,12 @@ func (m Model) View() string {
 	return strings.Join(lines, "\n")
 }
 
-// viewHeader renders the title bar: the current mode and drill-down breadcrumb
-// on the left, the capture interface and status pushed out to the right.
+// viewHeader renders the title bar: the current grouping on the left, the
+// capture interface and status pushed out to the right.
 func (m Model) viewHeader() string {
 	// The header style already pads a cell either side, so the segments hung
 	// off it must not add a leading space of their own.
-	left := m.styles.Header.Render(appName + " · " + modeLabel(m.stack.Top().Mode, m.grouping))
+	left := m.styles.Header.Render(appName + " · " + m.grouping.String())
 
 	// The sort key is named here as well as marked on the column it reads,
 	// because that column is one of the first to be dropped on a narrow
@@ -646,70 +540,13 @@ func (m Model) viewHeader() string {
 	}
 	right := status + flag
 
-	if path := m.stack.Breadcrumb(); path != "" {
-		// The breadcrumb is the one segment of the bar with no bound on its
-		// length — it grows a step with every level drilled — so it is given
-		// what the other segments leave rather than allowed to shove them off
-		// the end. Where that is not enough to say anything, the status half
-		// hands its cells over: which scope is on screen is the more useful of
-		// the two, and it only does so if that actually buys a breadcrumb.
-		//
-		// " live" goes with it, being the absence of news; " PAUSED " never
-		// does.
-		spare := ""
-		if m.paused {
-			spare = flag
-		}
-
-		room := m.viewWidth() - lipgloss.Width(left) - lipgloss.Width(right) - 1
-		bare := m.viewWidth() - lipgloss.Width(left) - lipgloss.Width(spare) - 1
-		if room < minBreadcrumbWidth && bare >= minBreadcrumbWidth {
-			right, room = spare, bare
-		}
-
-		if seg := breadcrumbSegment(path, m.stack.Top().Mode, room); seg != "" {
-			left += m.styles.Breadcrumb.Render(seg)
-		}
-	}
-
 	return joinEnds(left, right, m.viewWidth())
-}
-
-// breadcrumbSegment renders the drill path into at most w cells of the header
-// bar.
-//
-// With room it reads as the plan writes it — "› Process: Chrome (pid 4821) →
-// Destinations" — the trailing noun naming what the view the user landed in is
-// a list of. That noun is the first thing given up when the path outgrows the
-// bar, because the mode label at the other end of the same bar already says
-// it; only then is the path itself cut, and from the left, so that the
-// innermost scope — the one the rows on screen are actually filtered by —
-// survives.
-func breadcrumbSegment(path string, mode Mode, w int) string {
-	// Too narrow to read: the cells are better spent on the status, and a
-	// breadcrumb clipped to a couple of characters is worse than none.
-	if w < minBreadcrumbWidth {
-		return ""
-	}
-
-	noun := "Processes"
-	if mode == ModeDestination {
-		noun = "Destinations"
-	}
-
-	if full := breadcrumbPrefix + path + " → " + noun; lipgloss.Width(full) <= w {
-		return full
-	}
-	if short := breadcrumbPrefix + path; lipgloss.Width(short) <= w {
-		return short
-	}
-	return breadcrumbPrefix + truncateLeft(path, w-lipgloss.Width(breadcrumbPrefix))
 }
 
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
-	cols := fitColumns(tableColumns(m.stack.Top().Mode, m.grouping, m.hostname), m.viewWidth())
+	cols := fitColumns(tableColumns(m.grouping, m.hostname), m.viewWidth())
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {
@@ -734,16 +571,13 @@ func (m Model) viewTable() []string {
 	return m.fit(lines)
 }
 
-// emptyBody explains a table with no rows in it. A filter and a drill-down
-// scope are each a likelier reason for one than an idle capture, and each has
-// its own way out, so all three are worded separately rather than any of them
-// claiming the capture has seen nothing.
+// emptyBody explains a table with no rows in it. A filter is a likelier
+// reason for one than an idle capture, and it has its own way out, so the two
+// are worded separately rather than the filtered case claiming the capture
+// has seen nothing.
 func (m Model) emptyBody() string {
 	if m.filter != "" {
 		return emptyFilterMessage
-	}
-	if m.stack.Depth() > 0 {
-		return emptyScopeMessage
 	}
 	return emptyMessage
 }
@@ -791,29 +625,22 @@ func (m Model) viewFilterInput() string {
 	return m.styles.Footer.Render(joinEnds(m.input.View(), filterHint, w))
 }
 
-// footerKeys picks the hints for the current context: the standard set at the
-// top level, and once the user has drilled in, the way back out in place of
-// the top-level mode toggle. Esc does nothing at depth 0 and tab does nothing
-// below it, so advertising either where it has no effect would be a lie.
-//
-// A filter in force adds `/` to the list. It is the one state the user can put
+// footerKeys picks the hints for the current context: the standard set,
+// plus `/` once a filter is in force. It is the one state the user can put
 // the table into that hides rows, so it is the one they may need to undo
 // without having been told how; the rest of the time the footer is better
 // spent on the keys that do something to what is on screen.
 func (m Model) footerKeys() []key.Binding {
 	keys := m.keys.ShortHelp()
-	if m.stack.Depth() == 0 && m.filter == "" {
+	if m.filter == "" {
 		return keys
 	}
 
 	out := make([]key.Binding, 0, len(keys)+1)
 	for _, k := range keys {
-		if m.stack.Depth() > 0 && k.Help() == m.keys.Mode.Help() {
-			k = m.keys.Back
-		}
 		// Ahead of the help key, so the hints that change the table stay
 		// together and the two that are about the session stay last.
-		if m.filter != "" && k.Help() == m.keys.Help.Help() {
+		if k.Help() == m.keys.Help.Help() {
 			out = append(out, m.keys.Filter)
 		}
 		out = append(out, k)
@@ -873,19 +700,6 @@ func visibleWindow(n, cursor, limit int) (start, end int) {
 		start = n - limit
 	}
 	return start, start + limit
-}
-
-// modeLabel names the current view for the header bar. The by-destination
-// grouping is part of the name because it changes what a row means, and there
-// is no other affordance telling the user which of the two is active.
-func modeLabel(mode Mode, g aggregate.Grouping) string {
-	if mode == ModeProcess {
-		return "By Process"
-	}
-	if g == aggregate.GroupByIPPort {
-		return "By Destination (ip:port)"
-	}
-	return "By Destination (ip)"
 }
 
 // joinEnds lays left at the start of a w-wide line and right at its end. If
