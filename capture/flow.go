@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/boyvinall/trafficmon/dpi"
 )
 
 // Proto is the transport protocol of a flow.
@@ -87,6 +89,10 @@ type ByteCounter struct {
 	// hostnameAttempted is true once DPI has examined one candidate packet
 	// on this flow, whether or not it found a hostname.
 	hostnameAttempted bool
+	// assembler joins this flow's outbound bytes into a complete TLS
+	// ClientHello when its SNI extension is split across more than one TCP
+	// segment. Created lazily on the first candidate packet; nil until then.
+	assembler *dpi.HelloAssembler
 }
 
 // advance rolls the ring forward to the second containing now, zeroing every
@@ -207,6 +213,26 @@ func (c *ByteCounter) MarkHostnameAttempted() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.hostnameAttempted = true
+}
+
+// HelloInProgress reports whether this flow already has a hello reassembly
+// under way, so Capturer.inspect knows to keep feeding it segments even past
+// the packet-size threshold that started it.
+func (c *ByteCounter) HelloInProgress() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.assembler != nil
+}
+
+// AddHelloSegment feeds one candidate packet's TCP payload into this flow's
+// hello reassembly, creating it on first use.
+func (c *ByteCounter) AddHelloSegment(seq uint32, payload []byte) (ready []byte, done bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.assembler == nil {
+		c.assembler = dpi.NewHelloAssembler()
+	}
+	return c.assembler.Add(seq, payload)
 }
 
 // normalise folds a packet's 5-tuple onto the FlowKey that both directions of

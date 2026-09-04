@@ -1,10 +1,6 @@
 package dpi
 
-import (
-	"github.com/dreadl0ck/tlsx"
-	"github.com/gopacket/gopacket"
-	"github.com/gopacket/gopacket/layers"
-)
+import "github.com/dreadl0ck/tlsx"
 
 // tlsPort is the well-known port for TLS-wrapped traffic. A ClientHello sent
 // to any other port (STARTTLS, custom ports) goes undetected in this first
@@ -33,7 +29,7 @@ func (t *TLSSNIInspector) Candidate(p CandidatePacket) bool {
 }
 
 // Inspect implements Inspector.
-func (t *TLSSNIInspector) Inspect(data []byte, linkType layers.LinkType) (hostname string, ok bool) {
+func (t *TLSSNIInspector) Inspect(payload []byte) (hostname string, ok bool) {
 	// tlsx parses attacker-controlled bytes; a malformed or truncated record
 	// must not be allowed to take the capture loop down with it.
 	defer func() {
@@ -42,13 +38,8 @@ func (t *TLSSNIInspector) Inspect(data []byte, linkType layers.LinkType) (hostna
 		}
 	}()
 
-	// gopacket.NoCopy builds the packet's layers directly over data, the
-	// same zero-copy buffer the capture loop read from the handle — nothing
-	// here copies it. The only thing that outlives this call is the SNI
-	// string tlsx returns, already its own small allocation.
-	packet := gopacket.NewPacket(data, linkType, gopacket.NoCopy)
-	ch := tlsx.GetClientHelloBasic(packet)
-	if ch == nil || ch.SNI == "" {
+	var ch tlsx.ClientHelloBasic
+	if err := ch.Unmarshal(payload); err != nil || ch.SNI == "" {
 		return "", false
 	}
 	return ch.SNI, true

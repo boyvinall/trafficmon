@@ -6,8 +6,6 @@
 // into the one seam below without that loop needing protocol knowledge.
 package dpi
 
-import "github.com/gopacket/gopacket/layers"
-
 // CandidatePacket is the cheap, already-decoded slice of one packet's
 // metadata an Inspector's Candidate uses to decide whether Inspect is worth
 // its cost. It carries nothing that requires touching the payload — callers
@@ -41,11 +39,10 @@ type Inspector interface {
 	// Inspect. It must not itself touch the payload.
 	Candidate(p CandidatePacket) bool
 
-	// Inspect examines the full captured bytes of one packet already judged
-	// a Candidate and returns the hostname it found, if any. data is only
-	// valid for the duration of the call: callers reuse the underlying
-	// buffer on the very next read.
-	Inspect(data []byte, linkType layers.LinkType) (hostname string, ok bool)
+	// Inspect examines payload — a flow's application-layer bytes, already
+	// reassembled across however many TCP segments they arrived in — and
+	// returns the hostname it found, if any.
+	Inspect(payload []byte) (hostname string, ok bool)
 }
 
 // DefaultInspectors returns the inspector set Capturer runs with unless a

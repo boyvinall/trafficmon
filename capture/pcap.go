@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
 	"golang.org/x/sync/errgroup"
@@ -42,10 +43,12 @@ type Config struct {
 	// headers now that DPI inspects payload bytes: 1600 covers any TLS
 	// ClientHello that fits in a single packet, since that is itself bounded
 	// by the ~1500-byte link MTU almost everywhere, with margin for the
-	// Ethernet/VLAN header. It does not cover a ClientHello fragmented
-	// across multiple TCP segments (large post-quantum key_share/ECH
-	// configs can do this) — that needs TCP reassembly, which is out of
-	// scope; such a flow's SNI simply goes undetected.
+	// Ethernet/VLAN header. A ClientHello fragmented across multiple TCP
+	// segments (large post-quantum key_share/ECH configs can do this) is
+	// reassembled by Capturer.inspect within dpi.HelloAssembler's bounds — a
+	// contiguous, in-order run of segments up to a fixed size and count. A
+	// stream that arrives reordered, retransmitted, or with a gap still goes
+	// undetected: that needs full TCP reassembly, which stays out of scope.
 	SnapLen int
 
 	// Inspectors are the DPI routines run against each flow's early packets
@@ -204,16 +207,18 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) *By
 // inspect runs the configured Inspectors against one packet already
 // attributed to ctr's flow, stopping at the first one willing to look. It is
 // a no-op once ctr no longer needs inspection (see
-// ByteCounter.NeedsHostnameInspection) — a ClientHello, if there is one, is
-// on the first data-carrying packet of the connection, so re-parsing every
-// later packet on a long-lived flow would spend CPU for no further benefit.
+// ByteCounter.NeedsHostnameInspection). A flow whose ClientHello spans more
+// than one segment stays under inspection across several calls — see
+// ByteCounter.AddHelloSegment — but is still bounded to one overall attempt:
+// once that reassembly finishes or gives up, later packets on the same flow
+// are never re-parsed.
 //
 // data is the same zero-copy buffer the capture loop just read; it is used
 // here and only here, before the loop's next ZeroCopyReadPacketData call
-// invalidates it. An Inspector builds its gopacket.Packet directly over data
-// with gopacket.NoCopy, so nothing here copies it — the one copy that does
-// happen is the hostname string an Inspector hands back, a few dozen bytes
-// already an owned Go string by the time Inspect returns it.
+// invalidates it. extractTCPPayload builds its gopacket.Packet directly over
+// data with gopacket.NoCopy, so nothing here copies it — the one copy that
+// does happen is each segment's payload going into the flow's
+// dpi.HelloAssembler, which has to outlive the next read.
 func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType layers.LinkType, remote netip.Addr, ctr *ByteCounter, ts time.Time) {
 	if len(c.cfg.Inspectors) == 0 || !ctr.NeedsHostnameInspection() {
 		return
@@ -226,19 +231,53 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 		Outbound:    !inbound,
 		DatagramLen: int(info.Bytes),
 	}
+
+	inProgress := ctr.HelloInProgress()
 	for _, insp := range c.cfg.Inspectors {
-		if !insp.Candidate(cand) {
+		switch {
+		case inProgress:
+			if !cand.Outbound {
+				continue // a continuation only cares about this flow's own outbound bytes
+			}
+		case !insp.Candidate(cand):
 			continue
 		}
-		if host, ok := insp.Inspect(data, linkType); ok {
-			ctr.SetHostname(host)
-			c.hostnameCache.Put(remote.String(), host, ts)
+
+		seq, payload, ok := extractTCPPayload(data, linkType)
+		if !ok {
+			ctr.MarkHostnameAttempted()
+			return
+		}
+
+		ready, done := ctr.AddHelloSegment(seq, payload)
+		if ready != nil {
+			if host, ok := insp.Inspect(ready); ok {
+				ctr.SetHostname(host)
+				c.hostnameCache.Put(remote.String(), host, ts)
+			}
 		}
 		// A candidate packet was examined either way: don't keep retrying
-		// this flow on every subsequent packet.
-		ctr.MarkHostnameAttempted()
+		// this flow once reassembly is done, found a hostname or not.
+		if done {
+			ctr.MarkHostnameAttempted()
+		}
 		return
 	}
+}
+
+// extractTCPPayload decodes data with the stock gopacket TCP decoder — not
+// the fast transportPorts path flowDecoder uses for every packet, see
+// decode.go — to recover the sequence number and payload bytes hello
+// reassembly needs. It is only called for packets that already passed
+// Candidate or belong to a flow already mid reassembly, so this second
+// decode's cost stays bounded to a handful of packets per new TLS connection.
+func extractTCPPayload(data []byte, linkType layers.LinkType) (seq uint32, payload []byte, ok bool) {
+	packet := gopacket.NewPacket(data, linkType, gopacket.NoCopy)
+	tcp, isTCP := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	if !isTCP {
+		return 0, nil, false
+	}
+	return tcp.Seq, tcp.LayerPayload(), true
 }
 
 // Evict drops every flow last seen before the cutoff and reports how many it

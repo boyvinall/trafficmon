@@ -30,7 +30,7 @@ func (f *fakeInspector) Name() string { return "fake" }
 
 func (f *fakeInspector) Candidate(dpi.CandidatePacket) bool { return true }
 
-func (f *fakeInspector) Inspect([]byte, layers.LinkType) (string, bool) {
+func (f *fakeInspector) Inspect([]byte) (string, bool) {
 	f.calls++
 	return f.hostname, f.ok
 }
@@ -107,8 +107,11 @@ func TestCapturerInspectSetsHostnameAndCachesByIP(t *testing.T) {
 	insp := &fakeInspector{hostname: "example.com", ok: true}
 	c.cfg.Inspectors = []dpi.Inspector{insp}
 
-	info := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443}
-	c.inspect([]byte("clienthello"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 443, PSH: true, ACK: true},
+		gopacket.Payload(tlsClientHelloRecord("example.com")))
+	info := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443, Bytes: uint64(len(data) - 14)}
+	c.inspect(data, info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
 
 	if got := ctr.Hostname(); got != "example.com" {
 		t.Fatalf("ByteCounter.Hostname() = %q, want %q", got, "example.com")
@@ -119,7 +122,7 @@ func TestCapturerInspectSetsHostnameAndCachesByIP(t *testing.T) {
 
 	// A second packet on the same flow must not re-invoke the inspector: the
 	// hostname is already known.
-	c.inspect([]byte("more data"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	c.inspect(data, info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
 	if insp.calls != 1 {
 		t.Errorf("Inspect() called %d times, want 1", insp.calls)
 	}
@@ -207,6 +210,62 @@ func TestCapturerInspectSkipsHeaderOnlySegments(t *testing.T) {
 	}
 }
 
+// TestCapturerInspectReassemblesASplitClientHello covers the case
+// TestCapturerInspectSkipsHeaderOnlySegments does not: a ClientHello whose
+// SNI extension lands in a second TCP segment, split at an arbitrary byte
+// offset the way a large post-quantum key share pushes the record past one
+// packet's worth of payload.
+func TestCapturerInspectReassemblesASplitClientHello(t *testing.T) {
+	c := New(DefaultConfig())
+	c.cfg.Inspectors = dpi.DefaultInspectors()
+	now := time.Now()
+
+	key := FlowKey{
+		LocalAddr:  mustAddr(t, "192.168.1.10"),
+		LocalPort:  51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"),
+		RemotePort: 443,
+		Proto:      ProtoTCP,
+	}
+	ctr := c.record(key, now, 0, false)
+
+	full := tlsClientHelloRecord("split.example.com")
+	// Split near the end: the first chunk alone must still clear Candidate's
+	// datagram-length gate, and the second must not, to prove a continuation
+	// packet is fed in regardless of size once a hello is already in progress.
+	split := len(full) - 60
+	const startSeq = 5000
+
+	first := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 443, Seq: startSeq, PSH: true, ACK: true},
+		gopacket.Payload(full[:split]))
+	firstInfo := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443, Bytes: uint64(len(first) - 14)}
+	c.inspect(first, firstInfo, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if got := ctr.Hostname(); got != "" {
+		t.Fatalf("Hostname() = %q after the first segment alone, want empty", got)
+	}
+	if !ctr.NeedsHostnameInspection() {
+		t.Fatal("NeedsHostnameInspection() = false after only the first of two segments")
+	}
+
+	// The second segment is small enough on its own to fail Candidate's
+	// length gate — proving continuation packets are fed in regardless once
+	// a hello is already in progress.
+	second := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 443, Seq: startSeq + uint32(split), PSH: true, ACK: true},
+		gopacket.Payload(full[split:]))
+	secondInfo := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 443, Bytes: uint64(len(second) - 14)}
+	c.inspect(second, secondInfo, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if got := ctr.Hostname(); got != "split.example.com" {
+		t.Fatalf("Hostname() = %q, want %q", got, "split.example.com")
+	}
+	if ctr.NeedsHostnameInspection() {
+		t.Fatal("NeedsHostnameInspection() = true after reassembly completed")
+	}
+}
+
 func TestCapturerInspectStopsRetryingAfterAMiss(t *testing.T) {
 	c := New(DefaultConfig())
 	now := time.Now()
@@ -217,9 +276,14 @@ func TestCapturerInspectStopsRetryingAfterAMiss(t *testing.T) {
 	insp := &fakeInspector{ok: false}
 	c.cfg.Inspectors = []dpi.Inspector{insp}
 
-	info := packetInfo{Proto: ProtoTCP, DstPort: 443}
-	c.inspect([]byte("not tls"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
-	c.inspect([]byte("still not tls"), info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	// A complete, well-formed record so the assembler hands it to insp on the
+	// first packet — insp itself is the one reporting the miss.
+	data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 443, PSH: true, ACK: true},
+		gopacket.Payload(tlsClientHelloRecord("example.com")))
+	info := packetInfo{Proto: ProtoTCP, DstPort: 443, Bytes: uint64(len(data) - 14)}
+	c.inspect(data, info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+	c.inspect(data, info, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
 
 	if insp.calls != 1 {
 		t.Errorf("Inspect() called %d times after a miss, want 1", insp.calls)

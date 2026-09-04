@@ -280,3 +280,35 @@ func TestByteCounterNeedsHostnameInspection(t *testing.T) {
 		}
 	})
 }
+
+func TestByteCounterHelloInProgress(t *testing.T) {
+	c := &ByteCounter{}
+	if c.HelloInProgress() {
+		t.Error("HelloInProgress() = true for a fresh counter")
+	}
+
+	// A single segment already completing a record still counts as "in
+	// progress" having been touched at all — callers only consult this
+	// before NeedsHostnameInspection has gone false, so it does not matter
+	// that reassembly finished on the first call.
+	c.AddHelloSegment(1000, []byte{0x16, 0x03, 0x01, 0x00, 0x01, 0x00})
+	if !c.HelloInProgress() {
+		t.Error("HelloInProgress() = false after AddHelloSegment")
+	}
+}
+
+func TestByteCounterAddHelloSegmentJoinsAcrossCalls(t *testing.T) {
+	c := &ByteCounter{}
+
+	first := []byte{0x16, 0x03, 0x01, 0x00, 0x02}
+	if ready, done := c.AddHelloSegment(1000, first); ready != nil || done {
+		t.Fatalf("AddHelloSegment(first) = ready %v, done=%v; want nil, false", ready, done)
+	}
+
+	second := []byte{0xAA, 0xBB}
+	ready, done := c.AddHelloSegment(1000+uint32(len(first)), second)
+	want := append(append([]byte{}, first...), second...)
+	if !done || string(ready) != string(want) {
+		t.Fatalf("AddHelloSegment(second) = ready %v, done=%v; want %v, true", ready, done, want)
+	}
+}
