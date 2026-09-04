@@ -1,4 +1,4 @@
-package ui
+package tui
 
 import (
 	"fmt"
@@ -9,9 +9,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/boyvinall/mac-nethogs/aggregate"
-	"github.com/boyvinall/mac-nethogs/capture"
-	"github.com/boyvinall/mac-nethogs/procinfo"
+	"github.com/boyvinall/trafficmon/aggregate"
+	"github.com/boyvinall/trafficmon/capture"
+	"github.com/boyvinall/trafficmon/procinfo"
 )
 
 func TestViewHeader(t *testing.T) {

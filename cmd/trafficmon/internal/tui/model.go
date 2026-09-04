@@ -1,5 +1,5 @@
 // Package ui implements the Bubble Tea front end.
-package ui
+package tui
 
 import (
 	"context"
@@ -13,8 +13,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/boyvinall/mac-nethogs/aggregate"
-	"github.com/boyvinall/mac-nethogs/dns"
+	"github.com/boyvinall/trafficmon/aggregate"
+	"github.com/boyvinall/trafficmon/dns"
 )
 
 // TickInterval is the render cadence. It is deliberately independent of both
@@ -22,7 +22,7 @@ import (
 const TickInterval = time.Second
 
 // appName is the title shown at the left of the header bar.
-const appName = "mac-nethogs"
+const appName = "trafficmon"
 
 // chromeLines is how many lines View spends on furniture rather than data: the
 // header bar, the column titles and the footer.

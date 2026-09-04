@@ -13,18 +13,18 @@ import (
 	"github.com/urfave/cli/v3"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/boyvinall/mac-nethogs/aggregate"
-	"github.com/boyvinall/mac-nethogs/capture"
-	"github.com/boyvinall/mac-nethogs/dns"
-	"github.com/boyvinall/mac-nethogs/procinfo"
-	"github.com/boyvinall/mac-nethogs/ui"
+	"github.com/boyvinall/trafficmon/aggregate"
+	"github.com/boyvinall/trafficmon/capture"
+	"github.com/boyvinall/trafficmon/cmd/trafficmon/internal/tui"
+	"github.com/boyvinall/trafficmon/dns"
+	"github.com/boyvinall/trafficmon/procinfo"
 )
 
 var version = "dev"
 
 func main() {
 	app := &cli.Command{
-		Name:    "mac-nethogs",
+		Name:    "trafficmon",
 		Usage:   "live network bandwidth by process and destination, for macOS",
 		Version: version,
 		Flags: []cli.Flag{
@@ -107,7 +107,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	g.Go(func() error { return poller.Run(ctx) })
 	g.Go(func() error {
 		defer stop()
-		p := tea.NewProgram(ui.NewModel(ctx, agg, resolver, iface), tea.WithAltScreen(), tea.WithContext(ctx))
+		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, iface), tea.WithAltScreen(), tea.WithContext(ctx))
 		_, err := p.Run()
 		return err
 	})

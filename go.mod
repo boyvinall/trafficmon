@@ -1,4 +1,4 @@
-module github.com/boyvinall/mac-nethogs
+module github.com/boyvinall/trafficmon
 
 go 1.25.3
 

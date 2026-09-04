@@ -1,4 +1,4 @@
-package ui
+package tui
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/boyvinall/mac-nethogs/aggregate"
+	"github.com/boyvinall/trafficmon/aggregate"
 )
 
 // SortKey is the column driving row order, cycled with `s`.

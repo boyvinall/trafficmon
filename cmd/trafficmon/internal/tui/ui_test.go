@@ -1,4 +1,4 @@
-package ui
+package tui
 
 import (
 	"context"
@@ -15,8 +15,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"github.com/boyvinall/mac-nethogs/aggregate"
-	"github.com/boyvinall/mac-nethogs/dns"
+	"github.com/boyvinall/trafficmon/aggregate"
+	"github.com/boyvinall/trafficmon/dns"
 )
 
 // TestMain pins the colour profile so the rendered strings the tests assert on

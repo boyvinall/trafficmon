@@ -1,4 +1,4 @@
-# mac-nethogs
+# trafficmon
 
 A `netstat`-style TUI for macOS: every currently open connection — local and
 remote address, protocol, owning process and PID, and (for TCP) the kernel's
@@ -24,7 +24,7 @@ socket to enumerate, so those rows come from capture alone and carry no PID.
 
 ```sh
 make build
-sudo ./bin/mac-nethogs
+sudo ./bin/trafficmon
 ```
 
 Root is required for the same reasons `iftop` and `nettop` require it: opening
@@ -61,7 +61,9 @@ a live pcap handle, and reading other processes' socket fd info via `libproc`.
 | `procinfo/` | cgo `libproc` bindings, periodic open-socket enumeration incl. TCP state |
 | `aggregate/` | mutex-protected shared state, traffic join, per-grouping rollups |
 | `dns/` | async reverse DNS with an aggressive cache |
-| `ui/` | Bubble Tea model, key bindings, table, styles |
+| `cmd/trafficmon/internal/tui/` | Bubble Tea model, key bindings, table, styles |
+
+`capture/`, `procinfo/`, `aggregate/` and `dns/` form the core engine library; `cmd/trafficmon` is the TUI binary built on top of it.
 
 ## Development
 

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/boyvinall/mac-nethogs/capture"
-	"github.com/boyvinall/mac-nethogs/procinfo"
+	"github.com/boyvinall/trafficmon/capture"
+	"github.com/boyvinall/trafficmon/procinfo"
 )
 
 // GracePeriod bounds how long a connection lingers in the table, dimmed,

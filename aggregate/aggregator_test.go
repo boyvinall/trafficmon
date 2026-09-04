@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/boyvinall/mac-nethogs/capture"
-	"github.com/boyvinall/mac-nethogs/procinfo"
+	"github.com/boyvinall/trafficmon/capture"
+	"github.com/boyvinall/trafficmon/procinfo"
 )
 
 // localAddr is the host end of every connection the tests build; the join

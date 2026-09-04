@@ -1,4 +1,4 @@
-package ui
+package tui
 
 import (
 	"strings"
@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/boyvinall/mac-nethogs/aggregate"
+	"github.com/boyvinall/trafficmon/aggregate"
 )
 
 // columnTitles is the shorthand the layout tests assert against.

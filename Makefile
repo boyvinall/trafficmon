@@ -1,5 +1,5 @@
-MODULE  := github.com/boyvinall/mac-nethogs
-BINARY  := mac-nethogs
+MODULE  := github.com/boyvinall/trafficmon
+BINARY  := trafficmon
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
@@ -21,7 +21,7 @@ all: build lint test
 #: compile for the current platform
 build:
 	$(call PROMPT, $@)
-	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
+	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/trafficmon
 
 #: build then run under sudo (packet capture needs root)
 run: build
