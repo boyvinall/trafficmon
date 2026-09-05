@@ -308,7 +308,6 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 	}
 	cand.Payload = payload
 
-	matched := false
 	for _, insp := range c.cfg.Inspectors {
 		switch {
 		case inProgress:
@@ -318,7 +317,6 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 		case !insp.Candidate(cand):
 			continue
 		}
-		matched = true
 
 		if !cand.IsTCP {
 			// A single datagram, already complete: no reassembly, no
@@ -350,7 +348,7 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 	// Inspector wanted it: this flow's opening payload-bearing packet is
 	// never coming back, so there is nothing left to gain by asking again on
 	// its next packet.
-	if !inProgress && !matched {
+	if !inProgress {
 		ctr.MarkHostnameAttempted()
 	}
 }
