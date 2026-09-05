@@ -91,6 +91,15 @@ type Capturer struct {
 	// hostnameCache is the per-IP fallback: a flow with no hostname of its own
 	// can borrow the most recent one DPI found for the same remote IP.
 	hostnameCache *dpi.HostnameCache
+
+	// dnsQueries holds DNS query findings until the next DrainDNSQueries —
+	// unlike hostnameCache, these are never authoritative hostname data, so
+	// they get their own bounded buffer instead.
+	dnsQueries *dnsQueryRing
+
+	// synEvents holds SYN-only packets (connection attempts) until the next
+	// DrainSYNEvents.
+	synEvents *synEventRing
 }
 
 // New creates a Capturer. It does not open the interface; call Run for that.
@@ -99,6 +108,8 @@ func New(cfg Config) *Capturer {
 		cfg:           cfg,
 		flows:         make(map[FlowKey]*ByteCounter),
 		hostnameCache: dpi.NewHostnameCache(dpi.DefaultHostnameCacheCapacity, dpi.DefaultHostnameCacheTTL),
+		dnsQueries:    newDNSQueryRing(),
+		synEvents:     newSYNEventRing(),
 	}
 }
 
@@ -106,6 +117,18 @@ func New(cfg Config) *Capturer {
 // UI to consult when a connection has no hostname of its own.
 func (c *Capturer) HostnameCache() *dpi.HostnameCache {
 	return c.hostnameCache
+}
+
+// DrainDNSQueries returns every DNS query finding captured since the last
+// call and resets the buffer to empty.
+func (c *Capturer) DrainDNSQueries() []dpi.QueryFinding {
+	return c.dnsQueries.drain()
+}
+
+// DrainSYNEvents returns every SYN-only packet (connection attempt) captured
+// since the last call and resets the buffer to empty.
+func (c *Capturer) DrainSYNEvents() []SYNEvent {
+	return c.synEvents.drain()
 }
 
 // Run opens the interface and decodes packets into the flow table. If ctx is
@@ -193,7 +216,7 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		if !ok {
 			continue
 		}
-		key, inbound, ok := normalise(info.Src, info.Dst, info.SrcPort, info.DstPort, info.Proto, isLocal)
+		key, inbound, ok := normalise(info.Src, info.Dst, info.SrcPort, info.DstPort, info.Proto, iface, isLocal)
 		if !ok {
 			continue
 		}
@@ -207,6 +230,17 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		ctr := c.record(key, ts, info.Bytes, inbound)
 		c.inspect(data, info, inbound, dec.linkType, key.RemoteAddr, ctr, ts)
 		c.inspectPassive(data, info, dec.linkType, ts)
+
+		if info.Proto == ProtoTCP && info.SYN && !info.ACK {
+			c.synEvents.push(SYNEvent{
+				Iface:      iface,
+				LocalAddr:  key.LocalAddr,
+				LocalPort:  key.LocalPort,
+				RemoteAddr: key.RemoteAddr,
+				RemotePort: key.RemotePort,
+				At:         ts,
+			})
+		}
 	}
 }
 
@@ -392,6 +426,11 @@ func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.
 		for _, f := range insp.Inspect(payload) {
 			c.hostnameCache.Put(f.IP, f.Hostname, ts)
 		}
+		if qi, ok := insp.(dpi.QueryPassiveInspector); ok {
+			for _, f := range qi.InspectQuery(payload, info.Src.String(), info.Dst.String(), ts) {
+				c.dnsQueries.push(f)
+			}
+		}
 	}
 }
 
@@ -483,6 +522,7 @@ func (c *Capturer) Snapshot(now time.Time) map[FlowKey]FlowStats {
 			RateOutBps: rOut,
 			LastSeen:   ctr.LastSeen(),
 			Hostname:   ctr.Hostname(),
+			Iface:      k.Iface,
 		}
 	}
 	return out
@@ -498,6 +538,8 @@ type FlowStats struct {
 	// Hostname is the hostname DPI identified for this flow, or "" if none
 	// has been found.
 	Hostname string
+	// Iface is the name of the interface this flow was captured on.
+	Iface string
 }
 
 // ListInterfaces returns the interfaces libpcap can capture on. Requires root.

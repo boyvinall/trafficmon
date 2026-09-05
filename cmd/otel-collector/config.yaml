@@ -1,0 +1,51 @@
+receivers:
+  trafficmon:
+    collection_interval: 1s
+    max_peer_cardinality: 1000
+
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      network:
+      load:
+      filesystem:
+
+processors:
+  batch:
+
+  resourcedetection:
+    detectors: [env, system]
+    system:
+      hostname_sources: [os]
+
+exporters:
+  otlp:
+    endpoint: localhost:4317
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: detailed
+
+  prometheus:
+    endpoint: localhost:9464
+
+service:
+  pipelines:
+    metrics/trafficmon:
+      receivers: [trafficmon]
+      processors: [resourcedetection, batch]
+      exporters: [otlp, debug, prometheus]
+
+    metrics/host:
+      receivers: [hostmetrics]
+      processors: [resourcedetection, batch]
+      exporters: [otlp, debug, prometheus]
+
+    logs/trafficmon:
+      receivers: [trafficmon]
+      processors: [resourcedetection, batch]
+      exporters: [otlp, debug]

@@ -49,6 +49,10 @@ type FlowKey struct {
 	RemoteAddr netip.Addr
 	RemotePort uint16
 	Proto      Proto
+	// Iface is the name of the interface this flow was captured on, so that
+	// otherwise-identical flows seen on two different handles (the primary
+	// interface and loopback, say) don't collide in the flow table.
+	Iface string
 }
 
 // String renders k as "proto local:port -> remote:port", for logging.
@@ -252,10 +256,11 @@ func (c *ByteCounter) HelloInspector() string {
 }
 
 // normalise folds a packet's 5-tuple onto the FlowKey that both directions of
-// the connection share, using isLocal to work out which endpoint is ours. It
-// reports whether the packet was inbound, and whether it could be attributed
-// at all.
-func normalise(src, dst netip.Addr, srcPort, dstPort uint16, proto Proto, isLocal func(netip.Addr) bool) (key FlowKey, inbound, ok bool) {
+// the connection share, using isLocal to work out which endpoint is ours.
+// iface is the interface the packet was captured on, carried straight onto
+// the resulting key. It reports whether the packet was inbound, and whether
+// it could be attributed at all.
+func normalise(src, dst netip.Addr, srcPort, dstPort uint16, proto Proto, iface string, isLocal func(netip.Addr) bool) (key FlowKey, inbound, ok bool) {
 	switch {
 	case isLocal(src):
 		// Source-local is tested first so that loopback traffic, where both
@@ -267,6 +272,7 @@ func normalise(src, dst netip.Addr, srcPort, dstPort uint16, proto Proto, isLoca
 			RemoteAddr: dst,
 			RemotePort: dstPort,
 			Proto:      proto,
+			Iface:      iface,
 		}, false, true
 
 	case isLocal(dst):
@@ -276,6 +282,7 @@ func normalise(src, dst netip.Addr, srcPort, dstPort uint16, proto Proto, isLoca
 			RemoteAddr: src,
 			RemotePort: srcPort,
 			Proto:      proto,
+			Iface:      iface,
 		}, true, true
 
 	default:

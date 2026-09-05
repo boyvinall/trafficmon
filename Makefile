@@ -2,9 +2,11 @@ MODULE  := github.com/boyvinall/trafficmon
 BINARY  := trafficmon
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
-MODULE_DIRS := . cmd/trafficmon
+MODULE_DIRS := . cmd/trafficmon receiver cmd/otel-collector
 
-.PHONY: help all build lint test clean run bpf-generate
+OCB_VERSION := v0.119.0
+
+.PHONY: help all build lint test clean run bpf-generate generate-otel-collector build-otel-collector
 
 define PROMPT
 	@echo
@@ -17,7 +19,7 @@ define PROMPT
 endef
 
 #: build, lint, and test (default)
-all: build lint test
+all: build build-otel-collector lint test
 
 #: compile for the current platform
 build:
@@ -29,13 +31,23 @@ run: build
 	$(call PROMPT, $@)
 	sudo ./bin/$(BINARY)
 
-#: run all linters, across both modules
-lint:
+#: regenerate the ocb collector distribution sources (go.mod/go.sum, components.go, main*.go) from cmd/otel-collector/builder-config.yaml -- these are gitignored, not committed, so lint/test/build-otel-collector need this first on a fresh checkout
+generate-otel-collector:
+	$(call PROMPT, $@)
+	cd cmd/otel-collector && go run go.opentelemetry.io/collector/cmd/builder@$(OCB_VERSION) --config builder-config.yaml --skip-compilation && go mod tidy
+
+#: regenerate and compile the custom OpenTelemetry Collector distribution
+build-otel-collector: generate-otel-collector
+	$(call PROMPT, $@)
+	cd cmd/otel-collector && go build -o ../../bin/trafficmon-otelcol .
+
+#: run all linters, across all modules
+lint: generate-otel-collector
 	$(call PROMPT, $@)
 	for d in $(MODULE_DIRS); do (cd $$d && golangci-lint run ./...) || exit 1; done
 
-#: run all tests, across both modules
-test:
+#: run all tests, across all modules
+test: generate-otel-collector
 	$(call PROMPT, $@)
 	for d in $(MODULE_DIRS); do (cd $$d && go test ./...) || exit 1; done
 

@@ -31,8 +31,23 @@ jobs:
       - name: Generate eBPF bindings (Linux)
         if: runner.os == 'Linux'
         run: make bpf-generate
+      - name: Generate otel-collector distribution
+        run: make generate-otel-collector
       - run: make build
+      - run: make build-otel-collector
       - run: make test
       - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: cmd/trafficmon
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: receiver
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: cmd/otel-collector

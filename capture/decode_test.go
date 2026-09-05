@@ -295,6 +295,42 @@ func TestFlowDecoderCountsFullDatagramWhenTruncated(t *testing.T) {
 	}
 }
 
+// TestFlowDecoderDecodeSetsTCPFlags pins down that the SYN and ACK bits
+// decode reads out of the TCP header's flags byte are only meaningful for
+// TCP: a UDP packet's want packetInfo below leaves both zero even though it
+// carries a payload at the same offset.
+func TestFlowDecoderDecodeSetsTCPFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		tcp     *layers.TCP
+		wantSYN bool
+		wantACK bool
+	}{
+		{name: "syn only", tcp: &layers.TCP{SrcPort: 51000, DstPort: 443, SYN: true}, wantSYN: true, wantACK: false},
+		{name: "syn+ack", tcp: &layers.TCP{SrcPort: 51000, DstPort: 443, SYN: true, ACK: true}, wantSYN: true, wantACK: true},
+		{name: "ack only", tcp: &layers.TCP{SrcPort: 51000, DstPort: 443, ACK: true}, wantSYN: false, wantACK: true},
+		{name: "no flags", tcp: &layers.TCP{SrcPort: 51000, DstPort: 443}, wantSYN: false, wantACK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP), tt.tcp)
+
+			dec, err := newFlowDecoder(layers.LinkTypeEthernet)
+			if err != nil {
+				t.Fatalf("newFlowDecoder: %v", err)
+			}
+			got, ok := dec.decode(data)
+			if !ok {
+				t.Fatal("decode() reported the packet as unusable")
+			}
+			if got.SYN != tt.wantSYN || got.ACK != tt.wantACK {
+				t.Errorf("decode() SYN/ACK = %v/%v, want %v/%v", got.SYN, got.ACK, tt.wantSYN, tt.wantACK)
+			}
+		})
+	}
+}
+
 func TestNewFlowDecoderRejectsUnknownLinkType(t *testing.T) {
 	if _, err := newFlowDecoder(layers.LinkTypePPP); err == nil {
 		t.Fatal("newFlowDecoder(LinkTypePPP) = nil error, want an unsupported link type error")

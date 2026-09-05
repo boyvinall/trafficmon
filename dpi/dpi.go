@@ -7,6 +7,8 @@
 // below without that loop needing protocol knowledge.
 package dpi
 
+import "time"
+
 // recoverPanic recovers from a panic in an Inspect implementation, deferred
 // as `defer recoverPanic()`. Every Inspect parses bytes the remote endpoint
 // controls — a malformed or truncated record must not be allowed to take the
@@ -105,5 +107,32 @@ type PassiveInspector interface {
 // DefaultPassiveInspectors returns the passive inspector set Capturer runs
 // with unless a Config overrides it.
 func DefaultPassiveInspectors() []PassiveInspector {
-	return []PassiveInspector{NewDNSAnswerInspector()}
+	return []PassiveInspector{NewDNSAnswerInspector(), NewDNSQueryInspector()}
+}
+
+// QueryFinding is one DNS query observed leaving the host toward a resolver —
+// unlike HostnameFinding, it names a query in flight rather than a hostname
+// learned from a response, and is never written into HostnameCache.
+type QueryFinding struct {
+	Name       string
+	QType      string
+	ClientAddr string
+	ServerAddr string
+	At         time.Time
+}
+
+// QueryPassiveInspector is implemented by a PassiveInspector that also
+// reports the DNS queries it sees, in addition to whatever it reports
+// through Inspect. It is a separate interface rather than a wider
+// PassiveInspector.Inspect return type because InspectQuery needs the
+// packet's addresses and timestamp, which Inspect's payload-only signature
+// does not carry, and because most PassiveInspectors have no queries to
+// report at all.
+type QueryPassiveInspector interface {
+	PassiveInspector
+
+	// InspectQuery examines payload — the same complete DNS message Inspect
+	// would receive — and returns one QueryFinding per question, if payload
+	// is a query rather than a response.
+	InspectQuery(payload []byte, clientAddr, serverAddr string, at time.Time) []QueryFinding
 }

@@ -16,5 +16,14 @@ procinfo/bpf/**/*_bpfel.go
 procinfo/bpf/**/*_bpfeb.go
 procinfo/bpf/**/*.o
 
+# ocb-generated collector distribution sources (go.mod/go.sum, components.go,
+# main*.go); regenerate with `make build-otel-collector`.
+cmd/otel-collector/go.mod
+cmd/otel-collector/go.sum
+cmd/otel-collector/components.go
+cmd/otel-collector/main.go
+cmd/otel-collector/main_others.go
+cmd/otel-collector/main_windows.go
+
 *.md
 !README.md
