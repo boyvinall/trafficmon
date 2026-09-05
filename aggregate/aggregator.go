@@ -118,9 +118,16 @@ func (r ConnectionRecord) Closed(now time.Time) bool {
 // closingTCPState reports whether state is one of the kernel's winding-down
 // TCP states, as opposed to a connection that is listening or actively
 // established.
+//
+// State is each platform's own kernel state name (see CLAUDE.md's
+// procinfo/Socket.State note): Darwin spells these "FIN_WAIT_1"/"CLOSED",
+// Linux "FIN_WAIT1"/"CLOSE" — both spellings are listed here so this rule
+// agrees with either backend.
 func closingTCPState(state string) bool {
 	switch state {
-	case "CLOSE_WAIT", "LAST_ACK", "CLOSING", "TIME_WAIT", "FIN_WAIT_1", "FIN_WAIT_2", "CLOSED":
+	case "CLOSE_WAIT", "LAST_ACK", "CLOSING", "TIME_WAIT",
+		"FIN_WAIT_1", "FIN_WAIT_2", "CLOSED",
+		"FIN_WAIT1", "FIN_WAIT2", "CLOSE":
 		return true
 	default:
 		return false
@@ -232,7 +239,7 @@ type Snapshot struct {
 // goroutines and read by the UI.
 type Aggregator struct {
 	cap  *capture.Capturer
-	poll *procinfo.Poller
+	poll procinfo.ConnectionSource
 
 	// mu guards records. It is a plain Mutex, not an RWMutex: join is the
 	// only method that ever touches records, and it always writes, so there
@@ -245,7 +252,7 @@ type Aggregator struct {
 }
 
 // New wires an Aggregator to its two data sources.
-func New(c *capture.Capturer, p *procinfo.Poller) *Aggregator {
+func New(c *capture.Capturer, p procinfo.ConnectionSource) *Aggregator {
 	return &Aggregator{
 		cap:     c,
 		poll:    p,

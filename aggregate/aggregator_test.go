@@ -433,6 +433,10 @@ func TestClosedReadsTCPState(t *testing.T) {
 		{"FIN_WAIT_1", true},
 		{"FIN_WAIT_2", true},
 		{"CLOSED", true},
+		{"SYN_RECV", false},
+		{"FIN_WAIT1", true},
+		{"FIN_WAIT2", true},
+		{"CLOSE", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.state, func(t *testing.T) {

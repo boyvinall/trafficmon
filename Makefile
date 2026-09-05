@@ -4,7 +4,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 MODULE_DIRS := . cmd/trafficmon
 
-.PHONY: help all build lint test clean run
+.PHONY: help all build lint test clean run bpf-generate
 
 define PROMPT
 	@echo
@@ -43,6 +43,11 @@ test:
 clean:
 	$(call PROMPT, $@)
 	rm -rf bin/ dist/
+
+#: regenerate procinfo/bpf's bpf2go bindings + compiled BPF objects (Linux + BTF + clang/llvm/libbpf-dev/bpftool only; not part of `build`/`all` since the toolchain isn't available on a normal macOS dev machine -- CI runs this explicitly before building on the Linux leg)
+bpf-generate:
+	$(call PROMPT, $@)
+	go generate ./procinfo/bpf/...
 
 #: print Makefile targets and short descriptions
 help:
