@@ -9,5 +9,11 @@ dist/
 *.test
 *.out
 
+# bpf2go-generated bindings + compiled BPF objects (see procinfo/bpf/*/gen_linux.go);
+# regenerate with `make bpf-generate`.
+procinfo/bpf/**/*_bpfel.go
+procinfo/bpf/**/*_bpfeb.go
+procinfo/bpf/**/*.o
+
 *.md
 !README.md

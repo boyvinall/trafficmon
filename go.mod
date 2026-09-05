@@ -3,6 +3,7 @@ module github.com/boyvinall/trafficmon
 go 1.22.0
 
 require (
+	github.com/cilium/ebpf v0.17.3
 	github.com/cuonglm/quicsni v0.0.3
 	github.com/dreadl0ck/tlsx v1.1.0
 	github.com/gopacket/gopacket v1.3.1

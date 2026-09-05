@@ -22,6 +22,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libpcap-dev
+      - name: Install BPF toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y clang llvm libbpf-dev
+      # procinfo/bpf/headers/vmlinux.h is committed (a BTF header dump, not a
+      # build artifact), so this only compiles C against it -- no live kernel
+      # BTF access needed, just clang/llvm/libbpf-dev.
+      - name: Generate eBPF bindings (Linux)
+        if: runner.os == 'Linux'
+        run: make bpf-generate
       - run: make build
       - run: make test
       - uses: golangci/golangci-lint-action@v9

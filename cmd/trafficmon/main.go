@@ -94,8 +94,8 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	cfg.IncludeLoopback = cmd.Bool("include-loopback")
 
 	capturer := capture.New(cfg)
-	poller := procinfo.NewPoller()
-	agg := aggregate.New(capturer, poller)
+	source := procinfo.NewBestSource()
+	agg := aggregate.New(capturer, source)
 
 	// The resolver needs no goroutine of its own: it starts one per lookup,
 	// from the render loop, and bounds them itself.
@@ -106,7 +106,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return capturer.Run(ctx) })
-	g.Go(func() error { return poller.Run(ctx) })
+	g.Go(func() error { return source.Run(ctx) })
 	g.Go(func() error {
 		defer stop()
 		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), iface), tea.WithAltScreen(), tea.WithContext(ctx))
