@@ -2,6 +2,7 @@ MODULE  := github.com/boyvinall/trafficmon
 BINARY  := trafficmon
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
+MODULE_DIRS := . cmd/trafficmon
 
 .PHONY: help all build lint test clean run
 
@@ -21,22 +22,22 @@ all: build lint test
 #: compile for the current platform
 build:
 	$(call PROMPT, $@)
-	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/trafficmon
+	cd cmd/trafficmon && go build -ldflags "$(LDFLAGS)" -o ../../bin/$(BINARY) .
 
 #: build then run under sudo (packet capture needs root)
 run: build
 	$(call PROMPT, $@)
 	sudo ./bin/$(BINARY)
 
-#: run all linters
+#: run all linters, across both modules
 lint:
 	$(call PROMPT, $@)
-	golangci-lint run ./...
+	for d in $(MODULE_DIRS); do (cd $$d && golangci-lint run ./...) || exit 1; done
 
-#: run all tests
+#: run all tests, across both modules
 test:
 	$(call PROMPT, $@)
-	go test ./...
+	for d in $(MODULE_DIRS); do (cd $$d && go test ./...) || exit 1; done
 
 #: remove build artifacts
 clean:
