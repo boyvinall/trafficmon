@@ -30,6 +30,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 // Go-side struct mirroring to keep in sync.
 struct event {
 	__u64 timestamp_ns; // bpf_ktime_get_ns() at event time
+	__u64 skaddr;        // struct sock * identity, for correlating a connection's own events across state changes
 	__u32 pid;
 	__u8 proto;    // 0 = tcp, 1 = udp (unused today; always tcp)
 	__u8 ip_ver;   // 4 or 6
@@ -83,6 +84,17 @@ static __always_inline int emit_connect_event(struct sock *sk, int ret, int ip_v
 		return 0;
 
 	ev->timestamp_ns = bpf_ktime_get_ns();
+	// A plain `ev->skaddr = (__u64)sk;` gets the verifier's "pointer
+	// arithmetic with >>= operator prohibited": struct event is packed, so
+	// clang lowers that 8-byte store into per-byte shifts of sk itself --
+	// still a BTF-trusted pointer register at that point, which the
+	// verifier never allows to be shifted. Routing it through the read
+	// helper (source: a plain stack local holding the same bit pattern)
+	// keeps the store an opaque call instead of raw arithmetic on sk.
+	{
+		__u64 skaddr = (__u64)sk;
+		bpf_probe_read_kernel(&ev->skaddr, sizeof(ev->skaddr), &skaddr);
+	}
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
 	ev->proto = 0;
 	ev->source = SOURCE_CONNECT;

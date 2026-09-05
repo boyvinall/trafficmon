@@ -21,6 +21,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct event {
 	__u64 timestamp_ns;
+	__u64 skaddr; // struct sock * identity, for correlating a connection's own events across state changes
 	__u32 pid;
 	__u8 proto;
 	__u8 ip_ver;
@@ -113,6 +114,15 @@ static __always_inline int kretprobe_connect_exit(int ret, int ip_ver)
 		return 0;
 
 	ev->timestamp_ns = bpf_ktime_get_ns();
+	// See ../fentry/connect_fentry.c's matching comment: struct event is
+	// packed, so a plain `ev->skaddr = (__u64)sk;` gets lowered into
+	// per-byte shifts of sk itself, which the verifier rejects as pointer
+	// arithmetic on a still-pointer-typed register. The read helper keeps
+	// the store an opaque call instead.
+	{
+		__u64 skaddr = (__u64)sk;
+		bpf_probe_read_kernel(&ev->skaddr, sizeof(ev->skaddr), &skaddr);
+	}
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
 	ev->proto = 0;
 	ev->source = SOURCE_CONNECT;

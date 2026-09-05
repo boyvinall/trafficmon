@@ -45,6 +45,7 @@ const (
 // three declare struct event identically, so every ring buffer's raw sample
 // decodes into this one common type.
 type ebpfEvent struct {
+	SKAddr     uint64
 	Pid        uint32
 	IPVer      uint8
 	LocalPort  uint16
@@ -85,9 +86,10 @@ type EBPFSource struct {
 	rings   []ringSource
 	closers []io.Closer // links and *Objects, closed in reverse attach order
 
-	mu    sync.RWMutex
-	conns map[ebpfConnKey]Connection
-	names map[int32]string // cache: PID to executable name, pruned lazily
+	mu      sync.RWMutex
+	conns   map[ebpfConnKey]Connection
+	skToKey map[uint64]ebpfConnKey // struct sock * identity -> that connection's current key in conns
+	names   map[int32]string       // cache: PID to executable name, pruned lazily
 
 	eventCount atomic.Int64
 }
@@ -102,16 +104,67 @@ func NewEBPFSource() (*EBPFSource, error) {
 	}
 
 	s := &EBPFSource{
-		conns: make(map[ebpfConnKey]Connection),
-		names: make(map[int32]string),
+		conns:   make(map[ebpfConnKey]Connection),
+		skToKey: make(map[uint64]ebpfConnKey),
+		names:   make(map[int32]string),
 	}
 	if err := s.attach(); err != nil {
 		s.closeAll()
 		return nil, err
 	}
+	s.bootstrap()
 
 	slog.Info("procinfo: eBPF attach mode active", "mode", s.mode)
 	return s, nil
+}
+
+// bootstrap seeds conns with every TCP socket already open at attach time, via
+// one procfs walk (the same ListPIDs/SocketsForPID the procfs Poller itself
+// uses). The tracepoints attach fires are edge-triggered on a *future* state
+// transition, so a socket that reached its current state before they
+// attached -- a listener bound at boot, or a connection already established
+// -- would otherwise never appear until it happens to change state again.
+// Called after attach so any transition racing the procfs walk is still
+// captured by the ring buffer and simply overwrites this snapshot once
+// consumed.
+func (s *EBPFSource) bootstrap() {
+	pids, err := ListPIDs()
+	if err != nil {
+		slog.Warn("procinfo: eBPF bootstrap: listing PIDs", "error", err)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, pid := range pids {
+		socks, err := SocketsForPID(pid)
+		if err != nil || len(socks) == 0 {
+			continue
+		}
+		name := s.processNameLocked(pid)
+		for _, sock := range socks {
+			if sock.Proto != "tcp" {
+				continue
+			}
+			key := ebpfConnKey{
+				localAddr:  sock.LocalAddr,
+				localPort:  sock.LocalPort,
+				remoteAddr: sock.RemoteAddr,
+				remotePort: sock.RemotePort,
+			}
+			s.conns[key] = Connection{
+				PID:         pid,
+				ProcessName: name,
+				LocalAddr:   sock.LocalAddr,
+				LocalPort:   sock.LocalPort,
+				RemoteAddr:  sock.RemoteAddr,
+				RemotePort:  sock.RemotePort,
+				Proto:       sock.Proto,
+				State:       sock.State,
+			}
+		}
+	}
 }
 
 // btfAvailable reports whether the running kernel exposes its own BTF, the
@@ -193,8 +246,9 @@ func (s *EBPFSource) attachFentry() error {
 
 // A passive bind()+listen() socket that never calls connect() still fires
 // this tracepoint (oldstate=TCP_CLOSE newstate=TCP_LISTEN, confirmed via
-// nc -l against a real inet_sock_set_state trace), so LISTEN sockets need
-// no separate reconciliation path.
+// nc -l against a real inet_sock_set_state trace), so a listener bound after
+// this attaches needs no separate handling from a connecting socket. One
+// bound before this attaches is instead covered by bootstrap's procfs walk.
 func (s *EBPFSource) attachSockstate() error {
 	var objs sockstate.SockstateObjects
 	if err := sockstate.LoadSockstateObjects(&objs, nil); err != nil {
@@ -236,7 +290,8 @@ func decodeFentryEvent(raw []byte) (ebpfEvent, error) {
 		return ebpfEvent{}, err
 	}
 	return ebpfEvent{
-		Pid: e.Pid, IPVer: e.IpVer,
+		SKAddr: e.Skaddr,
+		Pid:    e.Pid, IPVer: e.IpVer,
 		LocalPort: e.LocalPort, RemotePort: e.RemotePort,
 		LocalAddr: e.LocalAddr, RemoteAddr: e.RemoteAddr,
 		NewState: e.NewState,
@@ -249,7 +304,8 @@ func decodeSockstateEvent(raw []byte) (ebpfEvent, error) {
 		return ebpfEvent{}, err
 	}
 	return ebpfEvent{
-		Pid: e.Pid, IPVer: e.IpVer,
+		SKAddr: e.Skaddr,
+		Pid:    e.Pid, IPVer: e.IpVer,
 		LocalPort: e.LocalPort, RemotePort: e.RemotePort,
 		LocalAddr: e.LocalAddr, RemoteAddr: e.RemoteAddr,
 		NewState: e.NewState,
@@ -334,13 +390,36 @@ func (s *EBPFSource) handleEvent(ev ebpfEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// oldKey, when present, is where this same struct sock's previous event
+	// landed -- found via SKAddr rather than key, since an early event in a
+	// connection's life (SYN_SENT before the kernel autobinds a local port,
+	// SYN_RECV before a child socket's remote address is populated) can
+	// carry an incomplete tuple that a later event on the same socket then
+	// corrects. Without this indirection the corrected entry lands under a
+	// new key and the original incomplete one is never deleted, since
+	// terminalTCPState's own delete only ever matches the *current* event's
+	// key.
+	oldKey, hadOld := s.skToKey[ev.SKAddr]
+
 	if terminalTCPState(state) {
-		delete(s.conns, key)
+		if hadOld {
+			delete(s.conns, oldKey)
+			delete(s.skToKey, ev.SKAddr)
+		} else {
+			delete(s.conns, key)
+		}
 		return
 	}
 
 	pid := int32(ev.Pid)
-	if existing, ok := s.conns[key]; ok {
+	if hadOld {
+		if existing, ok := s.conns[oldKey]; ok {
+			pid = existing.PID
+		}
+		if oldKey != key {
+			delete(s.conns, oldKey)
+		}
+	} else if existing, ok := s.conns[key]; ok {
 		pid = existing.PID
 	}
 
@@ -354,6 +433,7 @@ func (s *EBPFSource) handleEvent(ev ebpfEvent) {
 		Proto:       "tcp",
 		State:       state,
 	}
+	s.skToKey[ev.SKAddr] = key
 }
 
 // processNameLocked resolves and caches pid's executable name. Must be

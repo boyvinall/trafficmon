@@ -7,11 +7,6 @@
 // below without that loop needing protocol knowledge.
 package dpi
 
-// port443 is the well-known port for TLS and QUIC (HTTP/3) alike. A
-// connection negotiated on any other port (STARTTLS, custom ports) goes
-// undetected in this first pass.
-const port443 = 443
-
 // recoverPanic recovers from a panic in an Inspect implementation, deferred
 // as `defer recoverPanic()`. Every Inspect parses bytes the remote endpoint
 // controls — a malformed or truncated record must not be allowed to take the
@@ -43,6 +38,19 @@ type CandidatePacket struct {
 	// makes Inspect's own truncation check (on the real data slice)
 	// necessary in addition to this one.
 	DatagramLen int
+	// Payload is this packet's already-extracted application-layer bytes —
+	// the same slice Inspect itself would receive — so Candidate can
+	// recognise a protocol by its own leading bytes (TLS's ContentType and
+	// version, QUIC's long-header form bit) instead of assuming a
+	// well-known port: a TLS or QUIC handshake on a non-443 port (STARTTLS,
+	// or a custom port like gRPC-over-TLS on 4317) is otherwise
+	// indistinguishable from one that will never be TLS at all. It is the
+	// same zero-copy buffer Capturer's read loop holds; like Inspect's
+	// payload, Candidate must not retain it past its own call. Nil for a
+	// packet Capturer decided was not worth extracting at all (a
+	// header-only TCP segment, most obviously) — Candidate must handle
+	// that case rather than assume it is always populated.
+	Payload []byte
 }
 
 // Inspector examines packets of one flow and may report a hostname it found
@@ -52,7 +60,9 @@ type Inspector interface {
 	Name() string
 
 	// Candidate reports, cheaply, whether a packet is worth the cost of
-	// Inspect. It must not itself touch the payload.
+	// Inspect: cheaply meaning no protocol parsing, just recognising the
+	// shape (direction, size, and CandidatePacket.Payload's leading bytes)
+	// that Inspect's own real parse would need to succeed.
 	Candidate(p CandidatePacket) bool
 
 	// Inspect examines payload — a flow's application-layer bytes, already

@@ -1,6 +1,7 @@
 package dpi
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
@@ -88,17 +89,21 @@ func TestTLSSNIInspectorInspect(t *testing.T) {
 }
 
 func TestTLSSNIInspectorCandidate(t *testing.T) {
+	clientHello := buildClientHello("example.com")
+
 	tests := []struct {
 		name string
 		p    CandidatePacket
 		want bool
 	}{
-		{"matches", CandidatePacket{IsTCP: true, Outbound: true, DstPort: 443, DatagramLen: 500}, true},
-		{"inbound", CandidatePacket{IsTCP: true, Outbound: false, DstPort: 443, DatagramLen: 500}, false},
-		{"wrong port", CandidatePacket{IsTCP: true, Outbound: true, DstPort: 8443, DatagramLen: 500}, false},
-		{"not TCP", CandidatePacket{IsTCP: false, Outbound: true, DstPort: 443, DatagramLen: 500}, false},
-		{"too short for a real ClientHello", CandidatePacket{IsTCP: true, Outbound: true, DstPort: 443, DatagramLen: 10}, false},
-		{"SYN-sized, even with a full TCP option set", CandidatePacket{IsTCP: true, Outbound: true, DstPort: 443, DatagramLen: 100}, false},
+		{"matches", CandidatePacket{IsTCP: true, Outbound: true, Payload: clientHello}, true},
+		{"matches on a non-443 port", CandidatePacket{IsTCP: true, Outbound: true, DstPort: 4317, Payload: clientHello}, true},
+		{"inbound", CandidatePacket{IsTCP: true, Outbound: false, Payload: clientHello}, false},
+		{"not TCP", CandidatePacket{IsTCP: false, Outbound: true, Payload: clientHello}, false},
+		{"no payload extracted", CandidatePacket{IsTCP: true, Outbound: true}, false},
+		{"too short to carry a record header", CandidatePacket{IsTCP: true, Outbound: true, Payload: clientHello[:5]}, false},
+		{"not a TLS record at all", CandidatePacket{IsTCP: true, Outbound: true, Payload: bytes.Repeat([]byte{0xAB}, 200)}, false},
+		{"TLS record but not a ClientHello (e.g. a ServerHello)", CandidatePacket{IsTCP: true, Outbound: true, Payload: append([]byte{0x16, 0x03, 0x03, 0x00, 0x00, 0x02}, clientHello[6:]...)}, false},
 	}
 
 	inspector := NewTLSSNIInspector()

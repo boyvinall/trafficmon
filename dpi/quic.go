@@ -17,9 +17,25 @@ func NewQUICSNIInspector() *QUICSNIInspector { return &QUICSNIInspector{} }
 // Name implements Inspector.
 func (q *QUICSNIInspector) Name() string { return "quic-sni" }
 
-// Candidate implements Inspector.
+// Candidate implements Inspector. Recognising a QUIC Initial packet by its
+// own bytes, rather than assuming port 443, is what lets this also catch
+// QUIC negotiated on any other port.
 func (q *QUICSNIInspector) Candidate(p CandidatePacket) bool {
-	return !p.IsTCP && p.Outbound && p.DstPort == port443 && p.DatagramLen >= minInitialDatagramLen
+	return !p.IsTCP && p.Outbound && p.DatagramLen >= minInitialDatagramLen && looksLikeQUICInitial(p.Payload)
+}
+
+// looksLikeQUICInitial reports whether b starts with a QUIC long-header
+// packet of type Initial: RFC 9000 §17.2's Header Form and Fixed bits (the
+// top two bits of the first byte) are both 1, and the following 2 bits (the
+// Long Packet Type) are 0 for Initial -- together, the top nibble is 0xC
+// regardless of the packet-number-length bits below it, which vary. The
+// version field (the next 4 bytes) is never all-zero for a real Initial —
+// that encoding is reserved for version negotiation -- so this also requires
+// a nonzero version. Any false positive still has to survive quicsni's real
+// parse in Inspect.
+func looksLikeQUICInitial(b []byte) bool {
+	const longHeaderInitialNibble = 0xC0
+	return len(b) >= 5 && b[0]&0xF0 == longHeaderInitialNibble && (b[1] != 0 || b[2] != 0 || b[3] != 0 || b[4] != 0)
 }
 
 // Inspect implements Inspector.

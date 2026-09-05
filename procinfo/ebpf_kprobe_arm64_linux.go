@@ -21,7 +21,8 @@ func decodeKprobeEvent(raw []byte) (ebpfEvent, error) {
 		return ebpfEvent{}, err
 	}
 	return ebpfEvent{
-		Pid: e.Pid, IPVer: e.IpVer,
+		SKAddr: e.Skaddr,
+		Pid:    e.Pid, IPVer: e.IpVer,
 		LocalPort: e.LocalPort, RemotePort: e.RemotePort,
 		LocalAddr: e.LocalAddr, RemoteAddr: e.RemoteAddr,
 		NewState: e.NewState,
