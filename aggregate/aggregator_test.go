@@ -15,26 +15,26 @@ import (
 // never looks at it beyond copying it into the record.
 const localAddr = "192.168.1.10"
 
-func mustAddr(t testing.TB, s string) netip.Addr {
-	t.Helper()
+func mustAddr(tb testing.TB, s string) netip.Addr {
+	tb.Helper()
 	a, err := netip.ParseAddr(s)
 	if err != nil {
-		t.Fatalf("netip.ParseAddr(%q): %v", s, err)
+		tb.Fatalf("netip.ParseAddr(%q): %v", s, err)
 	}
 	return a
 }
 
 // conn builds a TCP connection with the shared local address, as procinfo's
-// poller would report it. t may be a *testing.T or a *testing.B, so the same
+// poller would report it. tb may be a *testing.T or a *testing.B, so the same
 // builder serves both tests and benchmarks.
-func conn(t testing.TB, pid int32, name string, localPort uint16, remote string, remotePort uint16) procinfo.Connection {
-	t.Helper()
+func conn(tb testing.TB, pid int32, name string, localPort uint16, remote string, remotePort uint16) procinfo.Connection {
+	tb.Helper()
 	return procinfo.Connection{
 		PID:         pid,
 		ProcessName: name,
-		LocalAddr:   mustAddr(t, localAddr),
+		LocalAddr:   mustAddr(tb, localAddr),
 		LocalPort:   localPort,
-		RemoteAddr:  mustAddr(t, remote),
+		RemoteAddr:  mustAddr(tb, remote),
 		RemotePort:  remotePort,
 		Proto:       "tcp",
 	}
@@ -670,7 +670,7 @@ func TestRefreshWiresBothSources(t *testing.T) {
 // TestAggregatorRefreshIsSafeForConcurrentUse drives Refresh from many
 // goroutines against one Aggregator, to prove the mutex guarding records is
 // sufficient. Run with -race to catch anything it misses.
-func TestAggregatorRefreshIsSafeForConcurrentUse(t *testing.T) {
+func TestAggregatorRefreshIsSafeForConcurrentUse(_ *testing.T) {
 	a := New(capture.New(capture.DefaultConfig()), procinfo.NewPoller())
 
 	const goroutines = 8

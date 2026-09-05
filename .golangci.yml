@@ -18,3 +18,54 @@ linters:
     - staticcheck
     - unused
     - ineffassign
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - dupword
+    - durationcheck
+    - errorlint
+    - exhaustive
+    - gocheckcompilerdirectives
+    - gocritic
+    - gosec
+    - makezero
+    - misspell
+    - nakedret
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - predeclared
+    - revive
+    - sqlclosecheck
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - wastedassign
+    - whitespace
+
+  settings:
+    exhaustive:
+      # This repo's enum-like switches (aggregate.Grouping, layers.LinkType)
+      # rely on a default case rather than listing every value.
+      default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # Narrowing/widening conversions (packet lengths, ports, PIDs) are
+        # pervasive and deliberate throughout capture/procinfo/dpi.
+        - G115
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          # Test helpers dial/listen without a context; that's normal for
+          # short-lived test fixtures, not production code.
+          - noctx
+          # Test fixtures narrow ints to build synthetic PIDs/lengths/ports.
+          - gosec

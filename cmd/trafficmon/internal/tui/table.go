@@ -642,7 +642,7 @@ func truncateSide(s string, w int, left bool) string {
 		reverseRunes(runes)
 	}
 
-	var kept []rune
+	kept := make([]rune, 0, len(runes))
 	used := 0
 	for _, r := range runes {
 		rw := lipgloss.Width(string(r))

@@ -287,10 +287,8 @@ func SocketsForPID(pid int32) ([]Socket, error) {
 		return nil, err
 	}
 
-	var (
-		out []Socket
-		fdi C.struct_socket_fdinfo
-	)
+	var fdi C.struct_socket_fdinfo
+	out := make([]Socket, 0, len(fds))
 	size := C.int(unsafe.Sizeof(fdi))
 
 	for i := range fds {
@@ -298,7 +296,7 @@ func SocketsForPID(pid int32) ([]Socket, error) {
 			continue
 		}
 
-		n, _ := C.proc_pidfdinfo(C.int(pid), fds[i].proc_fd, C.PROC_PIDFDSOCKETINFO, unsafe.Pointer(&fdi), size)
+		n, _ := C.proc_pidfdinfo(C.int(pid), fds[i].proc_fd, C.PROC_PIDFDSOCKETINFO, unsafe.Pointer(&fdi), size) //nolint:gocritic // cgo-preprocessed form of this call trips a spurious dupSubExpr match
 		if n < size {
 			// Short reads mean the fd went away or is not really a socket.
 			continue

@@ -144,10 +144,10 @@ func newTestModel(rows []aggregate.Row, width, height int) Model {
 // render loop does — by asking repeatedly — rather than reaching into the
 // resolver. Nothing here touches the network: the resolver is built over a
 // function that answers from names alone.
-func newResolvedModel(t *testing.T, names map[string]string, width, height int) Model {
+func newResolvedModel(t *testing.T, names map[string]string) Model {
 	t.Helper()
 
-	m := newTestModel(destinationRows(), width, height)
+	m := newTestModel(destinationRows(), 200, 12)
 	m.grouping = aggregate.GroupNone
 	m.resolver = dns.NewResolverWith(func(_ context.Context, addr string) ([]string, error) {
 		if name, ok := names[addr]; ok {

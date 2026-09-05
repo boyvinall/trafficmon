@@ -112,7 +112,7 @@ func withStubRoute(t *testing.T, stub func(ctx context.Context) ([]byte, error))
 }
 
 func TestDefaultInterfaceFallsBackWhenRouteFails(t *testing.T) {
-	withStubRoute(t, func(ctx context.Context) ([]byte, error) {
+	withStubRoute(t, func(_ context.Context) ([]byte, error) {
 		return nil, errors.New("route: writing to routing socket: not in table")
 	})
 
@@ -126,7 +126,7 @@ func TestDefaultInterfaceFallsBackWhenRouteFails(t *testing.T) {
 }
 
 func TestDefaultInterfaceFallsBackWhenRouteOutputIsUnrecognised(t *testing.T) {
-	withStubRoute(t, func(ctx context.Context) ([]byte, error) {
+	withStubRoute(t, func(_ context.Context) ([]byte, error) {
 		return []byte("garbage output with no interface line\n"), nil
 	})
 

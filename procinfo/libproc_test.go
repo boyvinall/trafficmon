@@ -352,7 +352,7 @@ func TestCgoErr(t *testing.T) {
 	}
 
 	want := errors.New("boom")
-	if got := cgoErr(want); got != want {
+	if got := cgoErr(want); !errors.Is(got, want) {
 		t.Errorf("cgoErr(%v) = %v, want the same error unchanged", want, got)
 	}
 }

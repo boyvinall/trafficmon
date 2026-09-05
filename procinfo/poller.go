@@ -1,3 +1,5 @@
+// Package procinfo periodically enumerates the kernel's open-socket table via
+// cgo bindings to libproc, joining it with each socket's owning process.
 package procinfo
 
 import (

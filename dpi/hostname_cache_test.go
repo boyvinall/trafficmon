@@ -74,7 +74,7 @@ func TestHostnameCacheLRUEviction(t *testing.T) {
 // TestHostnameCacheConcurrentAccess exercises Put/Get from many goroutines at
 // once, so `go test -race` can confirm the single mutex actually serializes
 // every access to the cache's internal list and map.
-func TestHostnameCacheConcurrentAccess(t *testing.T) {
+func TestHostnameCacheConcurrentAccess(_ *testing.T) {
 	c := NewHostnameCache(64, time.Minute)
 
 	var wg sync.WaitGroup

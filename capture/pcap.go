@@ -1,3 +1,5 @@
+// Package capture runs a live pcap handle, decoding packets into per-flow
+// byte counters and dispatching candidate packets to DPI inspectors.
 package capture
 
 import (
@@ -113,7 +115,7 @@ func (c *Capturer) Run(ctx context.Context) error {
 	iface := c.cfg.Interface
 	if iface == "" {
 		var err error
-		if iface, err = DefaultInterface(); err != nil {
+		if iface, err = DefaultInterface(); err != nil { //nolint:contextcheck // DefaultInterface deliberately owns its own short, fixed timeout rather than ctx's
 			return fmt.Errorf("detect interface: %w", err)
 		}
 	}

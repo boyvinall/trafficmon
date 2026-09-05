@@ -93,7 +93,7 @@ func connectionKey(c ConnectionRecord) string {
 // can't give one answer for.
 func rowsByPID(snap Snapshot) []Row {
 	return rollup(snap.Connections,
-		func(c ConnectionRecord) string { return pidRemoteKey(c) },
+		pidRemoteKey,
 		func(c ConnectionRecord, key string) Row {
 			return Row{
 				Key:        key,
@@ -112,7 +112,7 @@ func rowsByPID(snap Snapshot) []Row {
 // address:port, across every PID currently running as that name.
 func rowsByProcessName(snap Snapshot) []Row {
 	return rollup(snap.Connections,
-		func(c ConnectionRecord) string { return processRemoteKey(c) },
+		processRemoteKey,
 		func(c ConnectionRecord, key string) Row {
 			return Row{Key: key, Label: c.ProcessName, RemoteAddr: c.RemoteAddr, RemotePort: c.RemotePort, Hostname: c.Hostname}
 		},

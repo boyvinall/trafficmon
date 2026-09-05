@@ -1,3 +1,5 @@
+// Command trafficmon is a netstat-style TUI joining live socket state with
+// packet-capture bandwidth counters.
 package main
 
 import (
@@ -81,7 +83,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	iface := cmd.String("iface")
 	if iface == "" {
 		var err error
-		if iface, err = capture.DefaultInterface(); err != nil {
+		if iface, err = capture.DefaultInterface(); err != nil { //nolint:contextcheck // DefaultInterface deliberately owns its own short, fixed timeout rather than ctx's
 			return fmt.Errorf("detect interface: %w", err)
 		}
 	}

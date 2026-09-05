@@ -756,7 +756,7 @@ func TestHostnameColumnShowsTheAddressUntilItResolves(t *testing.T) {
 }
 
 func TestHostnameColumnShowsResolvedNames(t *testing.T) {
-	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"})
 
 	got := m.View()
 	if !strings.Contains(got, "lb.github.com") {
@@ -778,7 +778,7 @@ func TestHostnameColumnShowsResolvedNames(t *testing.T) {
 }
 
 func TestHostnamePrefersRowSNIOverDNS(t *testing.T) {
-	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"})
 
 	row := aggregate.Row{RemoteAddr: "140.82.112.3", Hostname: "own.example.com"}
 	if got := m.resolveHostname(row); got != "own.example.com" {
@@ -806,7 +806,7 @@ func TestHostnameFallsBackToPerIPCacheWhenRowHasNoSNI(t *testing.T) {
 }
 
 func TestHostnameFallsBackToDNSWhenNoSNIOrCacheEntry(t *testing.T) {
-	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"})
 	m.hostnameCache = dpi.NewHostnameCache(dpi.DefaultHostnameCacheCapacity, dpi.DefaultHostnameCacheTTL)
 
 	row := aggregate.Row{RemoteAddr: "140.82.112.3"}
@@ -843,7 +843,7 @@ func TestStateColumnHiddenWhenGrouped(t *testing.T) {
 }
 
 func TestFilterMatchesResolvedHostnames(t *testing.T) {
-	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"}, 200, 12)
+	m := newResolvedModel(t, map[string]string{"140.82.112.3": "lb.github.com"})
 	m.snap = testSnapshot()
 	m.rebuild()
 
@@ -1116,7 +1116,7 @@ func TestEmptyTableSaysWhyItIsEmpty(t *testing.T) {
 	}{
 		{
 			name:  "nothing captured yet",
-			model: func() Model { return newLiveModel() },
+			model: newLiveModel,
 			want:  emptyMessage,
 		},
 		{

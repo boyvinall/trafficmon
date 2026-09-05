@@ -1,4 +1,4 @@
-// Package ui implements the Bubble Tea front end.
+// Package tui implements the Bubble Tea front end.
 package tui
 
 import (
@@ -330,6 +330,8 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		m.commitFilter()
 		return m, nil
+	default:
+		// Every other key is ordinary text input, handled below.
 	}
 
 	var cmd tea.Cmd
