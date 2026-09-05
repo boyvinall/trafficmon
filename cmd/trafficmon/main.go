@@ -27,7 +27,7 @@ var version = "dev"
 func main() {
 	app := &cli.Command{
 		Name:    "trafficmon",
-		Usage:   "live network bandwidth by process and destination, for macOS",
+		Usage:   "live network bandwidth by process and destination",
 		Version: version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{

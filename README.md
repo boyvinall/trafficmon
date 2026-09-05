@@ -1,9 +1,9 @@
 # trafficmon
 
-A `netstat`-style TUI for macOS: every currently open connection — local and
-remote address, protocol, owning process and PID, and (for TCP) the kernel's
-connection state — whether or not it has carried any traffic. Bandwidth,
-where capture has counters for it, is joined onto the same row.
+A `netstat`-style TUI for macOS and Linux: every currently open connection —
+local and remote address, protocol, owning process and PID, and (for TCP) the
+kernel's connection state — whether or not it has carried any traffic.
+Bandwidth, where capture has counters for it, is joined onto the same row.
 
 Row existence for TCP/UDP comes from the kernel's live socket table, not from
 packet capture: an idle SSH session shows up just as readily as a connection
@@ -14,11 +14,12 @@ socket to enumerate, so those rows come from capture alone and carry no PID.
 
 ## Requirements
 
-- macOS
+- macOS or Linux
 - Go 1.22+
-- Xcode Command Line Tools (`xcode-select --install`) — the `procinfo` package
-  uses cgo to bind `libproc`
-- `libpcap` (ships with macOS)
+- On macOS: Xcode Command Line Tools (`xcode-select --install`) — the
+  `procinfo` package uses cgo to bind `libproc`; `libpcap` ships with macOS
+- On Linux: `libpcap-dev` (or your distro's equivalent); socket enumeration
+  is pure Go, parsing `/proc` directly, so no cgo toolchain is needed there
 
 ## Build and run
 
@@ -28,7 +29,8 @@ sudo ./bin/trafficmon
 ```
 
 Root is required for the same reasons `iftop` and `nettop` require it: opening
-a live pcap handle, and reading other processes' socket fd info via `libproc`.
+a live pcap handle, and reading other processes' socket fd info (via `libproc`
+on macOS, `/proc` on Linux).
 
 ### Flags
 
@@ -58,12 +60,13 @@ a live pcap handle, and reading other processes' socket fd info via `libproc`.
 | Package | Role |
 |---------|------|
 | `capture/` | gopacket/libpcap live capture, flow keys, rate windowing |
-| `procinfo/` | cgo `libproc` bindings, periodic open-socket enumeration incl. TCP state |
+| `procinfo/` | per-OS open-socket enumeration incl. TCP state (cgo `libproc` on macOS, `/proc` parsing on Linux) |
+| `dpi/` | pluggable deep-packet inspection: TLS/QUIC ClientHello SNI, plus a DNS-answer inspector feeding the hostname cache |
 | `aggregate/` | mutex-protected shared state, traffic join, per-grouping rollups |
 | `dns/` | async reverse DNS with an aggressive cache |
 | `cmd/trafficmon/internal/tui/` | Bubble Tea model, key bindings, table, styles |
 
-`capture/`, `procinfo/`, `aggregate/` and `dns/` form the core engine library; `cmd/trafficmon` is the TUI binary built on top of it.
+`capture/`, `procinfo/`, `dpi/`, `aggregate/` and `dns/` form the core engine library; `cmd/trafficmon` is the TUI binary built on top of it.
 
 ## Development
 

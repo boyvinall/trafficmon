@@ -7,14 +7,21 @@ on:
 
 jobs:
   build:
-    # macos only: cgo bindings to libproc and libpcap are darwin-specific.
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           # go.mod's directive (1.22.0) predates cmd/link emitting LC_UUID, which macOS 26's dyld requires.
           go-version: stable
+      - name: Install libpcap (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev
       - run: make build
       - run: make test
       - uses: golangci/golangci-lint-action@v9
