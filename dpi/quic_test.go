@@ -1,6 +1,7 @@
 package dpi
 
 import (
+	"bytes"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -101,12 +102,15 @@ func TestQUICSNIInspectorCandidate(t *testing.T) {
 		p    CandidatePacket
 		want bool
 	}{
-		{"matches", CandidatePacket{IsTCP: false, Outbound: true, DstPort: 443, DatagramLen: 1252}, true},
-		{"inbound", CandidatePacket{IsTCP: false, Outbound: false, DstPort: 443, DatagramLen: 1252}, false},
-		{"wrong port", CandidatePacket{IsTCP: false, Outbound: true, DstPort: 8443, DatagramLen: 1252}, false},
-		{"is TCP", CandidatePacket{IsTCP: true, Outbound: true, DstPort: 443, DatagramLen: 1252}, false},
-		{"under the Initial padding floor", CandidatePacket{IsTCP: false, Outbound: true, DstPort: 443, DatagramLen: 1199}, false},
-		{"exactly the Initial padding floor", CandidatePacket{IsTCP: false, Outbound: true, DstPort: 443, DatagramLen: 1200}, true},
+		{"matches", CandidatePacket{IsTCP: false, Outbound: true, DatagramLen: 1252, Payload: clientInitial}, true},
+		{"matches on a non-443 port", CandidatePacket{IsTCP: false, Outbound: true, DstPort: 8443, DatagramLen: 1252, Payload: clientInitial}, true},
+		{"inbound", CandidatePacket{IsTCP: false, Outbound: false, DatagramLen: 1252, Payload: clientInitial}, false},
+		{"is TCP", CandidatePacket{IsTCP: true, Outbound: true, DatagramLen: 1252, Payload: clientInitial}, false},
+		{"under the Initial padding floor", CandidatePacket{IsTCP: false, Outbound: true, DatagramLen: 1199, Payload: clientInitial}, false},
+		{"exactly the Initial padding floor", CandidatePacket{IsTCP: false, Outbound: true, DatagramLen: 1200, Payload: clientInitial}, true},
+		{"no payload extracted", CandidatePacket{IsTCP: false, Outbound: true, DatagramLen: 1252}, false},
+		{"not a QUIC long header at all", CandidatePacket{IsTCP: false, Outbound: true, DatagramLen: 1252, Payload: bytes.Repeat([]byte{0xAB}, 1252)}, false},
+		{"zero version (version negotiation, not Initial)", CandidatePacket{IsTCP: false, Outbound: true, DatagramLen: 1252, Payload: append([]byte{0xC0, 0x00, 0x00, 0x00, 0x00}, clientInitial[5:]...)}, false},
 	}
 
 	inspector := NewQUICSNIInspector()

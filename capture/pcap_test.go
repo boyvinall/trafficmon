@@ -303,7 +303,7 @@ func tlsClientHelloRecord(sni string) []byte {
 	extensions = append(extensions, serverNameList...)
 
 	// A padding extension (RFC 7685, type 21), sized so the whole datagram
-	// clears minClientHelloDatagramLen regardless of how long sni is — real
+	// clears minPayloadDatagramLen regardless of how long sni is — real
 	// ClientHellos are always this size or bigger once their real cipher
 	// suite list and extension set are counted.
 	const paddingLen = 200
@@ -452,6 +452,49 @@ func TestCapturerInspectStopsRetryingAfterAMiss(t *testing.T) {
 	}
 	if ctr.Hostname() != "" {
 		t.Errorf("ByteCounter.Hostname() = %q, want empty", ctr.Hostname())
+	}
+}
+
+// TestCapturerInspectGivesUpAfterOneNonMatchingPayload covers the
+// consequence of Candidate no longer being able to reject a flow cheaply by
+// port alone (see dpi.TLSSNIInspector.Candidate): once a flow's first
+// payload-bearing packet has been extracted and shown to none of the
+// configured Inspectors, the flow's one-shot budget is spent right there —
+// a genuine ClientHello is always a fresh connection's first payload, so a
+// flow whose opening packet is plain HTTP (say) must not keep paying
+// extraction cost on every later packet for the rest of its life.
+func TestCapturerInspectGivesUpAfterOneNonMatchingPayload(t *testing.T) {
+	c := New(DefaultConfig())
+	c.cfg.Inspectors = dpi.DefaultInspectors()
+	now := time.Now()
+
+	key := FlowKey{
+		LocalAddr:  mustAddr(t, "192.168.1.10"),
+		LocalPort:  51000,
+		RemoteAddr: mustAddr(t, "140.82.112.3"),
+		RemotePort: 4317,
+		Proto:      ProtoTCP,
+	}
+	ctr := c.record(key, now, 0, false)
+
+	notTLS := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 4317, PSH: true, ACK: true},
+		gopacket.Payload(bytes.Repeat([]byte{0xAB}, 200)))
+	notTLSInfo := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 4317, Bytes: uint64(len(notTLS) - 14)}
+	c.inspect(notTLS, notTLSInfo, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if ctr.NeedsHostnameInspection() {
+		t.Fatal("NeedsHostnameInspection() = true after the flow's opening payload was examined and matched nothing")
+	}
+
+	full := serialize(t, ethernet(layers.EthernetTypeIPv4), ipv4(layers.IPProtocolTCP),
+		&layers.TCP{SrcPort: 51000, DstPort: 4317, PSH: true, ACK: true},
+		gopacket.Payload(tlsClientHelloRecord("example.com")))
+	fullInfo := packetInfo{Proto: ProtoTCP, SrcPort: 51000, DstPort: 4317, Bytes: uint64(len(full) - 14)}
+	c.inspect(full, fullInfo, false, layers.LinkTypeEthernet, key.RemoteAddr, ctr, now)
+
+	if got := ctr.Hostname(); got != "" {
+		t.Fatalf("Hostname() = %q, want empty: a ClientHello arriving after the flow's opening packet must not be re-examined", got)
 	}
 }
 

@@ -25,6 +25,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct event {
 	__u64 timestamp_ns;
+	__u64 skaddr; // struct sock * identity, for correlating a connection's own events across state changes
 	__u32 pid;
 	__u8 proto;
 	__u8 ip_ver;
@@ -73,6 +74,15 @@ int tracepoint_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *c
 		return 0;
 
 	ev->timestamp_ns = bpf_ktime_get_ns();
+	// See ../fentry/connect_fentry.c's matching comment: struct event is
+	// packed, so a plain `ev->skaddr = (__u64)ctx->skaddr;` risks the
+	// verifier's "pointer arithmetic with >>= operator prohibited" if
+	// ctx->skaddr's value is still pointer-typed at that point. The read
+	// helper keeps the store an opaque call instead of raw arithmetic.
+	{
+		__u64 skaddr = (__u64)ctx->skaddr;
+		bpf_probe_read_kernel(&ev->skaddr, sizeof(ev->skaddr), &skaddr);
+	}
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
 	ev->proto = 0;
 	ev->source = SOURCE_STATE_CHANGE;

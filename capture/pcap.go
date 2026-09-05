@@ -25,6 +25,13 @@ import (
 // no process attribution since neither has one.
 const bpfFilter = "tcp or udp or icmp or icmp6 or arp"
 
+// minPayloadDatagramLen is a header-only TCP segment's (SYN, bare ACK, FIN)
+// upper bound even with a full set of TCP options -- anything at or below
+// it carries no application-layer bytes worth extracting for any Inspector,
+// so inspect uses it to skip extraction entirely rather than ask a content
+// check to reject an empty payload.
+const minPayloadDatagramLen = 120
+
 // readTimeout bounds how long one read blocks inside libpcap.
 //
 // pcap.BlockForever would park the reader in libpcap while holding the
@@ -235,6 +242,18 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) *By
 // once that reassembly finishes or gives up, later packets on the same flow
 // are never re-parsed.
 //
+// A fresh (non-continuation) candidate's payload is extracted up front,
+// before any Inspector's Candidate runs, so Candidate can recognise a
+// protocol from its own leading bytes instead of assuming a well-known
+// port — but only once DatagramLen alone (no extraction needed) has ruled
+// out a header-only TCP segment. If no Inspector accepts that first
+// extracted payload, the flow's one-shot budget is spent right there rather
+// than re-extracting every later packet: a genuine ClientHello (or QUIC
+// Initial) is always the first payload-bearing packet a fresh connection
+// carries, so this is what keeps a long-lived flow that is never TLS or
+// QUIC at all (a plain HTTP download, an SSH session) from paying an
+// extraction cost for its whole life instead of just once.
+//
 // A UDP candidate (QUIC's Initial packet) skips reassembly entirely: one
 // datagram is already a complete unit, so it is inspected directly and the
 // flow is marked attempted either way, hit or miss, with no continuation
@@ -275,6 +294,20 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 	if inProgress {
 		wantInspector = ctr.HelloInspector()
 	}
+
+	if !inProgress && cand.IsTCP && cand.DatagramLen <= minPayloadDatagramLen {
+		return // header-only TCP segment (SYN, bare ACK, FIN): nothing to extract
+	}
+
+	seq, payload, ok := extractPayload(data, linkType, cand.IsTCP)
+	if !ok {
+		if inProgress {
+			ctr.MarkHostnameAttempted()
+		}
+		return
+	}
+	cand.Payload = payload
+
 	for _, insp := range c.cfg.Inspectors {
 		switch {
 		case inProgress:
@@ -283,12 +316,6 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 			}
 		case !insp.Candidate(cand):
 			continue
-		}
-
-		seq, payload, ok := extractPayload(data, linkType, cand.IsTCP)
-		if !ok {
-			ctr.MarkHostnameAttempted()
-			return
 		}
 
 		if !cand.IsTCP {
@@ -315,6 +342,14 @@ func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType 
 			ctr.MarkHostnameAttempted()
 		}
 		return
+	}
+
+	// A fresh candidate's payload was examined (via Candidate, above) and no
+	// Inspector wanted it: this flow's opening payload-bearing packet is
+	// never coming back, so there is nothing left to gain by asking again on
+	// its next packet.
+	if !inProgress {
+		ctr.MarkHostnameAttempted()
 	}
 }
 
