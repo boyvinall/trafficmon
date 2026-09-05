@@ -10,8 +10,8 @@ jobs:
     # macos only: cgo bindings to libproc and libpcap are darwin-specific.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # go.mod's directive (1.22.0) predates cmd/link emitting LC_UUID, which macOS 26's dyld requires.
           go-version: stable
