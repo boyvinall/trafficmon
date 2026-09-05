@@ -69,3 +69,7 @@ linters:
           - noctx
           # Test fixtures narrow ints to build synthetic PIDs/lengths/ports.
           - gosec
+          # Synthetic packet builders grow byte slices via chained appends
+          # whose lengths depend on prior appends; there's no upfront size
+          # to preallocate.
+          - prealloc

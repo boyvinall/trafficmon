@@ -625,8 +625,10 @@ func (m Model) viewHelp() []string {
 	h.ShowAll = true
 	h.Width = m.viewWidth()
 
-	lines := []string{m.styles.ColumnHeader.Render("Key reference"), ""}
-	lines = append(lines, strings.Split(h.FullHelpView(m.keys.FullHelp()), "\n")...)
+	helpLines := strings.Split(h.FullHelpView(m.keys.FullHelp()), "\n")
+	lines := make([]string, 0, 2+len(helpLines))
+	lines = append(lines, m.styles.ColumnHeader.Render("Key reference"), "")
+	lines = append(lines, helpLines...)
 	return m.fit(lines)
 }
 
