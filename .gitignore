@@ -3,6 +3,7 @@
 !.github
 !.claude
 !.golangci.yml
+!.goreleaser.yaml
 
 bin/
 dist/
