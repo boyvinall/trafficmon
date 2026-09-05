@@ -13,7 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # go.mod's directive (1.22.0) predates cmd/link emitting LC_UUID, which macOS 26's dyld requires.
+          go-version: stable
       - run: make build
       - run: make test
       - uses: golangci/golangci-lint-action@v9
