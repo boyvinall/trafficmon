@@ -14,9 +14,9 @@ import (
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
-	"github.com/gopacket/gopacket/pcap"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/boyvinall/trafficmon/capture/pcapdrv"
 	"github.com/boyvinall/trafficmon/dpi"
 )
 
@@ -255,7 +255,7 @@ func (c *Capturer) Run(ctx context.Context) error {
 func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(netip.Addr) bool) error {
 	// Promiscuous mode stays off: we only want traffic this host is an
 	// endpoint of, and anything else would be attributed to no local socket.
-	handle, err := pcap.OpenLive(iface, int32(c.cfg.SnapLen), false, readTimeout)
+	handle, err := pcapdrv.OpenLive(iface, int32(c.cfg.SnapLen), false, readTimeout)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", iface, err)
 	}
@@ -296,7 +296,7 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		data, ci, err := handle.ZeroCopyReadPacketData()
 		switch {
 		case err == nil:
-		case errors.Is(err, pcap.NextErrorTimeoutExpired):
+		case errors.Is(err, pcapdrv.ErrTimeoutExpired):
 			continue
 		case errors.Is(err, io.EOF):
 			return fmt.Errorf("capture on %s ended", iface)
@@ -674,14 +674,9 @@ type PacketStats struct {
 
 // ListInterfaces returns the interfaces libpcap can capture on. Requires root.
 func ListInterfaces() ([]string, error) {
-	devs, err := pcap.FindAllDevs()
+	names, err := pcapdrv.FindAllDevs()
 	if err != nil {
-		return nil, fmt.Errorf("pcap.FindAllDevs: %w", err)
-	}
-
-	names := make([]string, 0, len(devs))
-	for _, d := range devs {
-		names = append(names, d.Name)
+		return nil, fmt.Errorf("pcapdrv.FindAllDevs: %w", err)
 	}
 	return names, nil
 }

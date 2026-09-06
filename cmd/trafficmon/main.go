@@ -80,6 +80,13 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("must run as root (try: sudo %s)", os.Args[0])
 	}
 
+	// Forces any pcap-open failure (most notably a missing libpcap on Linux)
+	// to surface here and exit cleanly, rather than racing the TUI goroutine
+	// that would otherwise be the first thing to open a handle.
+	if _, err := capture.ListInterfaces(); err != nil {
+		return fmt.Errorf("libpcap: %w", err)
+	}
+
 	iface := cmd.String("iface")
 	if iface == "" {
 		var err error
