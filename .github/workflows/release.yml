@@ -59,17 +59,19 @@ jobs:
       - name: Ad-hoc codesign (macOS)
         if: runner.os == 'macOS'
         run: codesign --sign - "${{ steps.bin.outputs.path }}"
-      - name: Rename binary
+      - name: Package binary
         shell: bash
         run: |
           mkdir -p out
           ext=""
           [ "${{ matrix.goos }}" = "windows" ] && ext=".exe"
-          cp "${{ steps.bin.outputs.path }}" "out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}$ext"
+          bin="trafficmon$ext"
+          cp "${{ steps.bin.outputs.path }}" "$bin"
+          7z a -tzip "out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}.zip" "$bin"
       - uses: actions/upload-artifact@v4
         with:
           name: trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}*
+          path: out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}.zip
           if-no-files-found: error
 
   publish:
@@ -82,9 +84,9 @@ jobs:
           merge-multiple: true
       - name: Checksums
         working-directory: dist
-        run: sha256sum trafficmon-* > checksums.txt
+        run: sha256sum trafficmon-*.zip > checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/trafficmon-*
+            dist/trafficmon-*.zip
             dist/checksums.txt
