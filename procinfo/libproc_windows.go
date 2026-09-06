@@ -4,6 +4,7 @@ package procinfo
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/netip"
 	"unsafe"
@@ -31,7 +32,7 @@ func ListPIDs() ([]int32, error) {
 			out = append(out, int32(entry.ProcessID))
 		}
 	}
-	if err != windows.ERROR_NO_MORE_FILES {
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 		return nil, fmt.Errorf("Process32Next: %w", err)
 	}
 	return out, nil
@@ -196,7 +197,7 @@ type mibUDP6RowOwnerPID struct {
 func getExtendedTable(fn *windows.LazyProc, family uint32, class uintptr) ([]byte, error) {
 	var size uint32
 	for range 8 {
-		r1, _, _ := fn.Call(0, uintptr(unsafe.Pointer(&size)), 1, uintptr(family), class, 0)
+		r1, _, _ := fn.Call(0, uintptr(unsafe.Pointer(&size)), 1, uintptr(family), class, 0) //nolint:gosec // passing &size to a Win32 API via syscall.Proc.Call
 		if r1 != uintptr(windows.ERROR_INSUFFICIENT_BUFFER) {
 			return nil, fmt.Errorf("%s: sizing call returned %d", fn.Name, r1)
 		}
@@ -205,7 +206,7 @@ func getExtendedTable(fn *windows.LazyProc, family uint32, class uintptr) ([]byt
 		}
 
 		buf := make([]byte, size)
-		r1, _, _ = fn.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)), 1, uintptr(family), class, 0)
+		r1, _, _ = fn.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&size)), 1, uintptr(family), class, 0) //nolint:gosec // passing &buf[0]/&size to a Win32 API via syscall.Proc.Call
 		switch r1 {
 		case 0:
 			return buf, nil
@@ -234,7 +235,7 @@ func tcpTable(family uint32) ([]Socket, error) {
 
 	out := make([]Socket, 0, numEntries)
 	if family == windows.AF_INET6 {
-		rows := unsafe.Slice((*mibTCP6RowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries)
+		rows := unsafe.Slice((*mibTCP6RowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries) //nolint:gosec // buf is sized and populated by GetExtendedTcpTable to hold exactly numEntries rows
 		for _, r := range rows {
 			s := Socket{
 				PID:        int32(r.OwningPID),
@@ -252,7 +253,7 @@ func tcpTable(family uint32) ([]Socket, error) {
 		return out, nil
 	}
 
-	rows := unsafe.Slice((*mibTCPRowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries)
+	rows := unsafe.Slice((*mibTCPRowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries) //nolint:gosec // buf is sized and populated by GetExtendedTcpTable to hold exactly numEntries rows
 	for _, r := range rows {
 		s := Socket{
 			PID:        int32(r.OwningPID),
@@ -284,7 +285,7 @@ func udpTable(family uint32) ([]Socket, error) {
 
 	out := make([]Socket, 0, numEntries)
 	if family == windows.AF_INET6 {
-		rows := unsafe.Slice((*mibUDP6RowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries)
+		rows := unsafe.Slice((*mibUDP6RowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries) //nolint:gosec // buf is sized and populated by GetExtendedUdpTable to hold exactly numEntries rows
 		for _, r := range rows {
 			s := Socket{
 				PID:       int32(r.OwningPID),
@@ -299,7 +300,7 @@ func udpTable(family uint32) ([]Socket, error) {
 		return out, nil
 	}
 
-	rows := unsafe.Slice((*mibUDPRowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries)
+	rows := unsafe.Slice((*mibUDPRowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries) //nolint:gosec // buf is sized and populated by GetExtendedUdpTable to hold exactly numEntries rows
 	for _, r := range rows {
 		s := Socket{
 			PID:       int32(r.OwningPID),

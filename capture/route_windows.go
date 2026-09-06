@@ -44,7 +44,7 @@ func adapterAddresses() (*windows.IpAdapterAddresses, error) {
 	size := uint32(15000)
 	for {
 		buf := make([]byte, size)
-		aa := (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0]))
+		aa := (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0])) //nolint:gosec // buf is sized to hold the adapter list GetAdaptersAddresses fills in-place
 		err := windows.GetAdaptersAddresses(windows.AF_UNSPEC, flags, 0, aa, &size)
 		if err == nil {
 			return aa, nil
