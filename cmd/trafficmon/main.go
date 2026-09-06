@@ -75,9 +75,10 @@ func parseLevel(s string) (slog.Level, error) {
 
 func run(ctx context.Context, cmd *cli.Command) error {
 	// Both packet capture and libproc visibility into other users' processes
-	// need root, same as iftop/nettop.
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("must run as root (try: sudo %s)", os.Args[0])
+	// need elevated privileges: root on macOS/Linux (same as iftop/nettop),
+	// Administrator on Windows.
+	if err := requirePrivileged(); err != nil {
+		return err
 	}
 
 	// Forces any pcap-open failure (most notably a missing libpcap on Linux)

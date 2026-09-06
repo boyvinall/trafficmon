@@ -228,10 +228,14 @@ func (c *Capturer) Run(ctx context.Context) error {
 	}
 
 	ifaces := []string{iface}
-	if c.cfg.IncludeLoopback && iface != loopbackInterface {
+	if c.cfg.IncludeLoopback && !isLoopbackInterface(iface) {
 		// Loopback traffic never reaches the primary interface, so it needs a
 		// handle of its own feeding the same flow map.
-		ifaces = append(ifaces, loopbackInterface)
+		lb, err := loopbackDeviceName()
+		if err != nil {
+			return fmt.Errorf("loopback interface: %w", err)
+		}
+		ifaces = append(ifaces, lb)
 	}
 
 	locals, err := localAddrSet(ifaces)
