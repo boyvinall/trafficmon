@@ -15,7 +15,7 @@ exporters:
     verbosity: detailed
 
   prometheus:
-    endpoint: localhost:9464
+    endpoint: 0.0.0.0:9464
 
 service:
   pipelines:

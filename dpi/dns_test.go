@@ -3,6 +3,7 @@ package dpi
 import (
 	"net"
 	"testing"
+	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
@@ -81,6 +82,61 @@ func TestDNSAnswerInspectorInspect(t *testing.T) {
 		}
 		if got := inspector.Inspect(garbage); got != nil {
 			t.Fatalf("Inspect() = %+v for garbage bytes, want nil", got)
+		}
+	})
+}
+
+func TestDNSAnswerInspectorInspectError(t *testing.T) {
+	inspector := NewDNSAnswerInspector()
+	now := time.Now()
+
+	t.Run("NXDOMAIN response", func(t *testing.T) {
+		msg := &layers.DNS{QR: true, ResponseCode: layers.DNSResponseCodeNXDomain}
+		msg.Questions = append(msg.Questions, layers.DNSQuestion{
+			Name: []byte("nonexistent.example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+		})
+
+		got := inspector.InspectError(dnsMessage(t, msg), "8.8.8.8", now)
+		want := []DNSErrorFinding{
+			{Name: "nonexistent.example.com", QType: "A", RCode: "Non-Existent Domain", ServerAddr: "8.8.8.8", At: now},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("InspectError() = %+v, want %+v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("InspectError()[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("successful response", func(t *testing.T) {
+		msg := &layers.DNS{QR: true, ResponseCode: layers.DNSResponseCodeNoErr}
+		msg.Questions = append(msg.Questions, layers.DNSQuestion{
+			Name: []byte("example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+		})
+		if got := inspector.InspectError(dnsMessage(t, msg), "8.8.8.8", now); got != nil {
+			t.Fatalf("InspectError() = %+v for a successful response, want nil", got)
+		}
+	})
+
+	t.Run("query", func(t *testing.T) {
+		msg := &layers.DNS{QR: false}
+		msg.Questions = append(msg.Questions, layers.DNSQuestion{
+			Name: []byte("example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+		})
+		if got := inspector.InspectError(dnsMessage(t, msg), "8.8.8.8", now); got != nil {
+			t.Fatalf("InspectError() = %+v for a query, want nil", got)
+		}
+	})
+
+	t.Run("garbage", func(t *testing.T) {
+		garbage := make([]byte, 100)
+		for i := range garbage {
+			garbage[i] = byte(i)
+		}
+		if got := inspector.InspectError(garbage, "8.8.8.8", now); got != nil {
+			t.Fatalf("InspectError() = %+v for garbage bytes, want nil", got)
 		}
 	})
 }

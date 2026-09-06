@@ -59,7 +59,14 @@ type ioTotals struct {
 
 type dnsKey struct{ name, qtype string }
 
+type dnsErrorKey struct{ name, qtype, rcode string }
+
 type synKey struct {
+	addr, iface string
+	port        uint16
+}
+
+type rstKey struct {
 	addr, iface string
 	port        uint16
 }
@@ -73,10 +80,13 @@ type synKey struct {
 type metricsState struct {
 	start time.Time
 
-	dnsCounts map[dnsKey]uint64
-	synCounts map[synKey]uint64
+	dnsCounts      map[dnsKey]uint64
+	dnsErrorCounts map[dnsErrorKey]uint64
+	synCounts      map[synKey]uint64
+	rstCounts      map[rstKey]uint64
 
 	synOverflowCount uint64
+	rstOverflowCount uint64
 	overflowBytesIn  uint64
 	overflowBytesOut uint64
 
@@ -91,10 +101,12 @@ type metricsState struct {
 
 func newMetricsState(start time.Time) *metricsState {
 	return &metricsState{
-		start:     start,
-		dnsCounts: make(map[dnsKey]uint64),
-		synCounts: make(map[synKey]uint64),
-		lastIO:    make(map[flowIdentity]ioTotals),
+		start:          start,
+		dnsCounts:      make(map[dnsKey]uint64),
+		dnsErrorCounts: make(map[dnsErrorKey]uint64),
+		synCounts:      make(map[synKey]uint64),
+		rstCounts:      make(map[rstKey]uint64),
+		lastIO:         make(map[flowIdentity]ioTotals),
 	}
 }
 
@@ -176,6 +188,34 @@ func (s *metricsState) buildMetrics(snap aggregate.Snapshot, now time.Time, cfg 
 		}
 	}
 
+	for _, e := range snap.DNSErrors {
+		s.dnsErrorCounts[dnsErrorKey{name: e.Name, qtype: e.QType, rcode: e.RCode}]++
+	}
+	if len(snap.DNSErrors) > 0 {
+		dnsErrMetric := sm.Metrics().AppendEmpty()
+		dnsErrMetric.SetName(metadata.MetricDNSQueryErrors)
+		dnsErrMetric.SetUnit("{query}")
+		dnsErrSum := dnsErrMetric.SetEmptySum()
+		dnsErrSum.SetIsMonotonic(true)
+		dnsErrSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+		seen := make(map[dnsErrorKey]struct{}, len(snap.DNSErrors))
+		for _, e := range snap.DNSErrors {
+			k := dnsErrorKey{name: e.Name, qtype: e.QType, rcode: e.RCode}
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			dp := dnsErrSum.DataPoints().AppendEmpty()
+			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+			dp.SetIntValue(int64(s.dnsErrorCounts[k]))
+			dp.Attributes().PutStr("dns.question.name", k.name)
+			dp.Attributes().PutStr(metadata.AttrDNSQuestionType, k.qtype)
+			dp.Attributes().PutStr(metadata.AttrDNSResponseCode, k.rcode)
+		}
+	}
+
 	touchedSYN := make(map[synKey]struct{}, len(snap.SYNEvents))
 	for _, ev := range snap.SYNEvents {
 		if limiter.allow(ev.RemoteAddr.String(), ev.RemotePort) {
@@ -209,6 +249,59 @@ func (s *metricsState) buildMetrics(snap aggregate.Snapshot, now time.Time, cfg 
 			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
 			dp.SetIntValue(int64(s.synOverflowCount))
 			dp.Attributes().PutBool(metadata.AttrPeerOverflow, true)
+		}
+	}
+
+	touchedRST := make(map[rstKey]struct{}, len(snap.RSTEvents))
+	for _, ev := range snap.RSTEvents {
+		if limiter.allow(ev.RemoteAddr.String(), ev.RemotePort) {
+			k := rstKey{addr: ev.RemoteAddr.String(), port: ev.RemotePort, iface: ev.Iface}
+			s.rstCounts[k]++
+			touchedRST[k] = struct{}{}
+			continue
+		}
+		s.rstOverflowCount++
+	}
+	if len(snap.RSTEvents) > 0 {
+		rstMetric := sm.Metrics().AppendEmpty()
+		rstMetric.SetName(metadata.MetricNetworkRSTCount)
+		rstMetric.SetUnit("{reset}")
+		rstSum := rstMetric.SetEmptySum()
+		rstSum.SetIsMonotonic(true)
+		rstSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+		for k := range touchedRST {
+			dp := rstSum.DataPoints().AppendEmpty()
+			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+			dp.SetIntValue(int64(s.rstCounts[k]))
+			dp.Attributes().PutStr("network.peer.address", k.addr)
+			dp.Attributes().PutInt("network.peer.port", int64(k.port))
+			dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, k.iface)
+		}
+		if s.rstOverflowCount > 0 {
+			dp := rstSum.DataPoints().AppendEmpty()
+			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+			dp.SetIntValue(int64(s.rstOverflowCount))
+			dp.Attributes().PutBool(metadata.AttrPeerOverflow, true)
+		}
+	}
+
+	if len(snap.PacketStats) > 0 {
+		droppedMetric := sm.Metrics().AppendEmpty()
+		droppedMetric.SetName(metadata.MetricCapturePacketsDropped)
+		droppedMetric.SetUnit("{packet}")
+		droppedSum := droppedMetric.SetEmptySum()
+		droppedSum.SetIsMonotonic(true)
+		droppedSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+		for iface, stats := range snap.PacketStats {
+			dp := droppedSum.DataPoints().AppendEmpty()
+			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+			dp.SetIntValue(int64(stats.Dropped))
+			dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, iface)
 		}
 	}
 

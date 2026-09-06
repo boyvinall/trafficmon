@@ -136,3 +136,31 @@ type QueryPassiveInspector interface {
 	// is a query rather than a response.
 	InspectQuery(payload []byte, clientAddr, serverAddr string, at time.Time) []QueryFinding
 }
+
+// DNSErrorFinding is one DNS response naming an error (NXDOMAIN, SERVFAIL,
+// etc.) rather than a successful answer — unlike HostnameFinding, it names a
+// failure in flight rather than a hostname learned, and is never written
+// into HostnameCache.
+type DNSErrorFinding struct {
+	Name       string
+	QType      string
+	RCode      string
+	ServerAddr string
+	At         time.Time
+}
+
+// ErrorPassiveInspector is implemented by a PassiveInspector that also
+// reports the DNS error responses it sees, in addition to whatever it
+// reports through Inspect. It is a separate interface rather than a wider
+// PassiveInspector.Inspect return type for the same reason
+// QueryPassiveInspector is: InspectError needs the packet's server address
+// and timestamp, which Inspect's payload-only signature does not carry, and
+// most PassiveInspectors have no errors to report at all.
+type ErrorPassiveInspector interface {
+	PassiveInspector
+
+	// InspectError examines payload — the same complete DNS message Inspect
+	// would receive — and returns one DNSErrorFinding per question, if
+	// payload is a response naming an error rather than a successful answer.
+	InspectError(payload []byte, serverAddr string, at time.Time) []DNSErrorFinding
+}

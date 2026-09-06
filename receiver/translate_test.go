@@ -218,6 +218,50 @@ func TestBuildMetricsDNSQueryCount(t *testing.T) {
 	}
 }
 
+func TestBuildMetricsDNSQueryErrors(t *testing.T) {
+	now := time.Now()
+	cfg := NewDefaultConfig()
+	state := newMetricsState(now)
+
+	snap := aggregate.Snapshot{
+		DNSErrors: []dpi.DNSErrorFinding{
+			{Name: "nonexistent.example.com.", QType: "A", RCode: "Non-Existent Domain", ServerAddr: "8.8.8.8", At: now},
+			{Name: "nonexistent.example.com.", QType: "A", RCode: "Non-Existent Domain", ServerAddr: "8.8.8.8", At: now},
+		},
+	}
+
+	md := state.buildMetrics(snap, now, cfg)
+	m := findMetric(md, metadata.MetricDNSQueryErrors)
+	if m == nil {
+		t.Fatal("trafficmon.dns.query.errors metric not found")
+	}
+	dp, ok := findDataPoint(m.Sum().DataPoints(), map[string]any{
+		"dns.question.name":          "nonexistent.example.com.",
+		metadata.AttrDNSQuestionType: "A",
+		metadata.AttrDNSResponseCode: "Non-Existent Domain",
+	})
+	if !ok {
+		t.Fatal("data point not found")
+	}
+	if dp.IntValue() != 2 {
+		t.Errorf("count = %d, want 2", dp.IntValue())
+	}
+
+	// A second tick with one more error for the same name must accumulate,
+	// since the metric is a cumulative running total, not a per-tick count.
+	md2 := state.buildMetrics(aggregate.Snapshot{
+		DNSErrors: []dpi.DNSErrorFinding{{Name: "nonexistent.example.com.", QType: "A", RCode: "Non-Existent Domain", At: now}},
+	}, now.Add(time.Second), cfg)
+	m2 := findMetric(md2, metadata.MetricDNSQueryErrors)
+	dp2, ok := findDataPoint(m2.Sum().DataPoints(), map[string]any{"dns.question.name": "nonexistent.example.com."})
+	if !ok {
+		t.Fatal("data point not found on second tick")
+	}
+	if dp2.IntValue() != 3 {
+		t.Errorf("cumulative count = %d, want 3", dp2.IntValue())
+	}
+}
+
 func TestBuildMetricsSYNCount(t *testing.T) {
 	now := time.Now()
 	cfg := NewDefaultConfig()
@@ -248,6 +292,66 @@ func TestBuildMetricsSYNCount(t *testing.T) {
 	}
 	if dp.IntValue() != 2 {
 		t.Errorf("count = %d, want 2", dp.IntValue())
+	}
+}
+
+func TestBuildMetricsRSTCount(t *testing.T) {
+	now := time.Now()
+	cfg := NewDefaultConfig()
+	state := newMetricsState(now)
+
+	ev := capture.RSTEvent{
+		Iface:      "en0",
+		LocalAddr:  netip.MustParseAddr("10.0.0.5"),
+		LocalPort:  51000,
+		RemoteAddr: netip.MustParseAddr("93.184.216.34"),
+		RemotePort: 443,
+		At:         now,
+	}
+	snap := aggregate.Snapshot{RSTEvents: []capture.RSTEvent{ev, ev}}
+
+	md := state.buildMetrics(snap, now, cfg)
+	m := findMetric(md, metadata.MetricNetworkRSTCount)
+	if m == nil {
+		t.Fatal("trafficmon.network.rst.count metric not found")
+	}
+	dp, ok := findDataPoint(m.Sum().DataPoints(), map[string]any{
+		"network.peer.address":            "93.184.216.34",
+		"network.peer.port":               int64(443),
+		metadata.AttrNetworkInterfaceName: "en0",
+	})
+	if !ok {
+		t.Fatal("data point not found")
+	}
+	if dp.IntValue() != 2 {
+		t.Errorf("count = %d, want 2", dp.IntValue())
+	}
+}
+
+func TestBuildMetricsPacketsDropped(t *testing.T) {
+	now := time.Now()
+	cfg := NewDefaultConfig()
+	state := newMetricsState(now)
+
+	snap := aggregate.Snapshot{
+		PacketStats: map[string]capture.PacketStats{
+			"en0": {Received: 1000, Dropped: 5, IfDropped: 2},
+		},
+	}
+
+	md := state.buildMetrics(snap, now, cfg)
+	m := findMetric(md, metadata.MetricCapturePacketsDropped)
+	if m == nil {
+		t.Fatal("trafficmon.capture.packets.dropped metric not found")
+	}
+	dp, ok := findDataPoint(m.Sum().DataPoints(), map[string]any{
+		metadata.AttrNetworkInterfaceName: "en0",
+	})
+	if !ok {
+		t.Fatal("data point not found")
+	}
+	if dp.IntValue() != 5 {
+		t.Errorf("dropped = %d, want 5", dp.IntValue())
 	}
 }
 

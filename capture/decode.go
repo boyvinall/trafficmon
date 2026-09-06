@@ -27,10 +27,11 @@ type packetInfo struct {
 	DstPort uint16
 	Proto   Proto
 
-	// SYN and ACK are the TCP flags of the same name, meaningful only when
-	// Proto is ProtoTCP — UDP/ICMP/ARP have no TCP flags to read.
+	// SYN, ACK and RST are the TCP flags of the same name, meaningful only
+	// when Proto is ProtoTCP — UDP/ICMP/ARP have no TCP flags to read.
 	SYN bool
 	ACK bool
+	RST bool
 
 	// Bytes is the size of the whole IP datagram — IP header, transport
 	// header and payload — taken from the IP header's own length field.
@@ -53,11 +54,12 @@ type packetInfo struct {
 // at any realistic SnapLen since the whole frame is smaller than the default.
 const arpFrameBytes = 28
 
-// tcpFlagSYN and tcpFlagACK are the bit positions of the SYN and ACK flags
-// within a TCP header's flags byte (offset 13).
+// tcpFlagSYN, tcpFlagACK and tcpFlagRST are the bit positions of the SYN,
+// ACK and RST flags within a TCP header's flags byte (offset 13).
 const (
 	tcpFlagSYN = 0x02
 	tcpFlagACK = 0x10
+	tcpFlagRST = 0x04
 )
 
 // transportPorts is a minimal DecodingLayer for TCP and UDP that reads the
@@ -194,6 +196,7 @@ func (d *flowDecoder) decode(data []byte) (packetInfo, bool) {
 			info.Proto = ProtoTCP
 			info.SYN = d.ports.flags&tcpFlagSYN != 0
 			info.ACK = d.ports.flags&tcpFlagACK != 0
+			info.RST = d.ports.flags&tcpFlagRST != 0
 			haveTransport = true
 
 		case layers.LayerTypeUDP:

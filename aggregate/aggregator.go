@@ -238,12 +238,18 @@ type Snapshot struct {
 	// build on.
 	At          time.Time
 	Connections []ConnectionRecord
-	// SYNEvents and DNSQueries are the capture-only event streams drained
-	// since the previous refresh — unlike Connections, these are not
-	// retained across ticks, so a consumer that skips a Refresh loses
-	// whatever accumulated in between.
+	// SYNEvents, RSTEvents, DNSQueries and DNSErrors are the capture-only
+	// event streams drained since the previous refresh — unlike Connections,
+	// these are not retained across ticks, so a consumer that skips a
+	// Refresh loses whatever accumulated in between.
 	SYNEvents  []capture.SYNEvent
+	RSTEvents  []capture.RSTEvent
 	DNSQueries []dpi.QueryFinding
+	DNSErrors  []dpi.DNSErrorFinding
+	// PacketStats is each capture interface's most recently sampled pcap
+	// statistics, keyed by interface name — unlike the event streams above,
+	// this is a point-in-time snapshot, not drained.
+	PacketStats map[string]capture.PacketStats
 }
 
 // Aggregator owns the shared state written by the capture and poller
@@ -277,7 +283,10 @@ func (a *Aggregator) Refresh(now time.Time) Snapshot {
 	conns := a.poll.Connections()
 	snap := a.join(conns, a.cap.Snapshot(now), now)
 	snap.SYNEvents = a.cap.DrainSYNEvents()
+	snap.RSTEvents = a.cap.DrainRSTEvents()
 	snap.DNSQueries = a.cap.DrainDNSQueries()
+	snap.DNSErrors = a.cap.DrainDNSErrors()
+	snap.PacketStats = a.cap.PacketStats()
 
 	// Drop the counters behind whatever can no longer possibly be on
 	// screen. The capture side never forgets a flow on its own, so without

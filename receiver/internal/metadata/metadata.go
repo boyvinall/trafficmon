@@ -36,6 +36,16 @@ const (
 	// MetricNetworkSYNCount is a cumulative monotonic sum of outbound TCP
 	// SYNs (connection attempts) observed, per remote endpoint.
 	MetricNetworkSYNCount = "trafficmon.network.syn.count"
+	// MetricNetworkRSTCount is a cumulative monotonic sum of TCP RSTs
+	// observed, per remote endpoint.
+	MetricNetworkRSTCount = "trafficmon.network.rst.count"
+	// MetricCapturePacketsDropped is a cumulative monotonic sum of packets
+	// pcap reports dropped, per capture interface.
+	MetricCapturePacketsDropped = "trafficmon.capture.packets.dropped"
+	// MetricDNSQueryErrors is a cumulative monotonic sum of DNS responses
+	// naming an error, per (dns.question.name, dns.question.type,
+	// dns.response_code).
+	MetricDNSQueryErrors = "trafficmon.dns.query.errors"
 )
 
 // Attribute keys with no equivalent in go.opentelemetry.io/otel/semconv.
@@ -56,6 +66,9 @@ const (
 	// AttrSYNAttemptCount is the number of SYNs seen for the log record's
 	// exact (local, remote) 4-tuple within the trailing synAttemptWindow.
 	AttrSYNAttemptCount = "network.syn.attempt_count"
+	// AttrDNSResponseCode is a DNS response's status (e.g. "NXDOMAIN",
+	// "SERVFAIL").
+	AttrDNSResponseCode = "dns.response_code"
 )
 
 // Values for AttrNetworkIODirection.
