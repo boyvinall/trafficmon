@@ -147,16 +147,48 @@ var runRoute = func(_ context.Context) ([]byte, error) {
 	return []byte(strconv.FormatUint(uint64(idx), 10)), nil
 }
 
-// parseRouteInterface resolves the interface index runRoute found into its
-// name via net.InterfaceByIndex.
+// parseRouteInterface resolves the interface index runRoute found into the
+// libpcap NPF device name backing it -- every other caller of DefaultInterface
+// treats its return value as a libpcap device name (ListInterfaces, --iface,
+// pcapdrv.OpenLive), and on Windows that name is never the OS's own interface
+// name (net.Interface.Name), unlike Darwin's en0/Linux's eth0 where the two
+// coincide.
 func parseRouteInterface(out string) (string, error) {
 	idx, err := strconv.Atoi(strings.TrimSpace(out))
 	if err != nil {
 		return "", fmt.Errorf("parse interface index: %w", err)
 	}
-	ifi, err := net.InterfaceByIndex(idx)
+	return deviceNameForIndex(uint32(idx))
+}
+
+// deviceNameForIndex resolves an interface index to the libpcap NPF device
+// name backing it, the reverse of resolveInterface: it looks up the GUID
+// GetAdaptersAddresses reports for that index, then matches it against every
+// device name libpcap offers.
+func deviceNameForIndex(idx uint32) (string, error) {
+	aa, err := adapterAddresses()
 	if err != nil {
 		return "", fmt.Errorf("interface index %d: %w", idx, err)
 	}
-	return ifi.Name, nil
+	var guid string
+	for ; aa != nil; aa = aa.Next {
+		if aa.IfIndex == idx {
+			guid = windows.BytePtrToString(aa.AdapterName)
+			break
+		}
+	}
+	if guid == "" {
+		return "", fmt.Errorf("interface index %d: no adapter found", idx)
+	}
+
+	names, err := pcapdrv.FindAllDevs()
+	if err != nil {
+		return "", fmt.Errorf("pcapdrv.FindAllDevs: %w", err)
+	}
+	for _, name := range names {
+		if g, ok := npfGUID(name); ok && g == guid {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("interface index %d: no libpcap device matching GUID %s", idx, guid)
 }

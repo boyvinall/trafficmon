@@ -97,21 +97,24 @@ func TestRunRoutePicksAResolvableInterface(t *testing.T) {
 // path via withStubRoute (iface_test.go), matching the darwin/linux
 // coverage of the same fallback.
 func TestDefaultInterfaceUsesStubbedRoute(t *testing.T) {
-	ifaces, err := net.Interfaces()
-	if err != nil || len(ifaces) == 0 {
-		t.Skip("no interfaces available")
+	names, err := ListInterfaces()
+	if err != nil || len(names) == 0 {
+		t.Skip("no capturable interfaces available")
 	}
-	want := ifaces[0]
+	ifi, err := resolveInterface(names[0])
+	if err != nil {
+		t.Skipf("resolveInterface(%q) error = %v", names[0], err)
+	}
 
 	withStubRoute(t, func(_ context.Context) ([]byte, error) {
-		return []byte(strconv.FormatUint(uint64(want.Index), 10)), nil
+		return []byte(strconv.FormatUint(uint64(ifi.Index), 10)), nil
 	})
 
 	name, err := DefaultInterface()
 	if err != nil {
 		t.Fatalf("DefaultInterface() error = %v", err)
 	}
-	if name != want.Name {
-		t.Errorf("DefaultInterface() = %q, want %q", name, want.Name)
+	if name != names[0] {
+		t.Errorf("DefaultInterface() = %q, want %q", name, names[0])
 	}
 }
