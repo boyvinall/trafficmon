@@ -25,6 +25,9 @@ jobs:
           - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -51,18 +54,22 @@ jobs:
           args: build --single-target --clean
       - name: Locate built binary
         id: bin
+        shell: bash
         run: echo "path=$(jq -r '.[] | select(.type=="Binary") | .path' dist/artifacts.json)" >> "$GITHUB_OUTPUT"
       - name: Ad-hoc codesign (macOS)
         if: runner.os == 'macOS'
         run: codesign --sign - "${{ steps.bin.outputs.path }}"
       - name: Rename binary
+        shell: bash
         run: |
           mkdir -p out
-          cp "${{ steps.bin.outputs.path }}" out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}
+          ext=""
+          [ "${{ matrix.goos }}" = "windows" ] && ext=".exe"
+          cp "${{ steps.bin.outputs.path }}" "out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}$ext"
       - uses: actions/upload-artifact@v4
         with:
           name: trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}*
           if-no-files-found: error
 
   publish:

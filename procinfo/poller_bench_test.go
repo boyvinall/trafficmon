@@ -10,9 +10,10 @@ import (
 // BenchmarkPoller drives *procinfo.Poller's poll()/Run path against
 // synthetic connection churn (see runChurn in churn_bench_test.go) at
 // churnRates (50/200/500 conns/sec), reporting CPU user+sys (via
-// syscall.Getrusage) and connection counts alongside testing.B's own
-// timing. Unlike BenchmarkEBPF this needs no root/eBPF privileges and runs
-// on every platform Poller supports, so it is not skip-gated.
+// getrusageSelf/cpuSeconds, each platform's own accounting) and connection
+// counts alongside testing.B's own timing. Unlike BenchmarkEBPF this needs
+// no root/eBPF privileges and runs on every platform Poller supports, so it
+// is not skip-gated.
 func BenchmarkPoller(b *testing.B) {
 	for _, rate := range churnRates {
 		b.Run(fmt.Sprintf("%dconns_sec", rate), func(b *testing.B) {

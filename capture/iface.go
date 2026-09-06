@@ -20,6 +20,12 @@ const routeTimeout = 3 * time.Second
 // defined per-OS: see route_darwin.go and route_linux.go. runRoute is a
 // variable so tests can substitute a stub and exercise DefaultInterface's
 // fallback path without depending on the host's actual routing table.
+//
+// resolveInterface and isLoopbackInterface are also variables, one
+// implementation shared by Darwin/Linux (route_other.go) and one for Windows
+// (route_windows.go), where a libpcap device name isn't the OS's own
+// interface name and the loopback device has no stable name to compare
+// against.
 
 // DefaultInterface resolves the interface backing the default route, mirroring
 // what `route get default` reports — the same trick iftop uses to pick an
@@ -43,7 +49,7 @@ func DefaultInterface() (string, error) {
 		return "", err
 	}
 	for _, n := range names {
-		if n != loopbackInterface {
+		if !isLoopbackInterface(n) {
 			return n, nil
 		}
 	}
@@ -59,7 +65,7 @@ func localAddrSet(names []string) (map[netip.Addr]struct{}, error) {
 	set := make(map[netip.Addr]struct{})
 
 	for _, name := range names {
-		ifi, err := net.InterfaceByName(name)
+		ifi, err := resolveInterface(name)
 		if err != nil {
 			return nil, fmt.Errorf("interface %s: %w", name, err)
 		}

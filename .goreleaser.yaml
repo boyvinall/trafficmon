@@ -15,10 +15,22 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: trafficmon-windows
+    dir: cmd/trafficmon
+    main: .
+    binary: trafficmon
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 
 archives:
   - id: trafficmon
-    ids: [trafficmon]
+    ids: [trafficmon, trafficmon-windows]
     formats: [binary]
     name_template: "{{ .Binary }}-{{ .Os }}-{{ .Arch }}"
 
