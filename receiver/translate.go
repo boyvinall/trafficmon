@@ -358,37 +358,40 @@ func addOverflowIODataPoints(points pmetric.NumberDataPointSlice, start, now tim
 	}
 }
 
-// buildLogs translates one aggregate.Snapshot's SYNEvents and DNSQueries
-// into log records. snap.Connections is consulted only for the DNS query
-// record's best-effort client-PID attribution. synAttempts carries the
-// rolling per-4-tuple SYN counts across calls; its prune runs once per call
-// so a 4-tuple that has stopped attempting eventually drops out.
-func buildLogs(snap aggregate.Snapshot, now time.Time, synAttempts *synAttemptCache) plog.Logs {
+// pidByLocalAddrFrom maps a locally bound address to the PID currently
+// holding it, for addDNSQueryLogRecord's client attribution. It is
+// necessarily best-effort: procinfo's socket table is polled once a second
+// (see aggregate.GracePeriod's doc comment), so a DNS query's outbound
+// socket can easily open and close between polls with no snapshot ever
+// reporting it.
+func pidByLocalAddrFrom(conns []aggregate.ConnectionRecord) map[string]int32 {
+	m := make(map[string]int32, len(conns))
+	for _, rec := range conns {
+		m[rec.LocalAddr] = rec.PID
+	}
+	return m
+}
+
+// buildLogBatch translates a batch of SYN/DNS-query events, collected off
+// capture.Capturer's streaming log feed since the last flush, into log
+// records. pidByLocalAddr is used only for the DNS query record's
+// best-effort client-PID attribution (see pidByLocalAddrFrom). synAttempts
+// carries the rolling per-4-tuple SYN counts across calls; its prune runs
+// once per call so a 4-tuple that has stopped attempting eventually drops
+// out.
+func buildLogBatch(synEvents []capture.SYNEvent, dnsQueries []dpi.QueryFinding, now time.Time, synAttempts *synAttemptCache, pidByLocalAddr map[string]int32) plog.Logs {
 	ld := plog.NewLogs()
 	sl := ld.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty()
 	sl.Scope().SetName(metadata.ScopeName)
 
-	if len(snap.DNSQueries) > 0 || len(snap.SYNEvents) > 0 {
-		// pidByLocalAddr maps a locally bound address to the PID currently
-		// holding it, for DNSQueryFinding's client attribution below. It is
-		// necessarily best-effort: procinfo's socket table is polled once a
-		// second (see aggregate.GracePeriod's doc comment), so a DNS query's
-		// outbound socket can easily open and close between polls with no
-		// snapshot ever reporting it.
-		pidByLocalAddr := make(map[string]int32, len(snap.Connections))
-		for _, rec := range snap.Connections {
-			pidByLocalAddr[rec.LocalAddr] = rec.PID
-		}
-
-		for _, q := range snap.DNSQueries {
-			addDNSQueryLogRecord(sl.LogRecords(), q, now, pidByLocalAddr)
-		}
-		synAttempts.prune(now)
-		for _, ev := range snap.SYNEvents {
-			key := synAttemptKeyFor(ev)
-			count := synAttempts.record(key, ev.At)
-			addSYNLogRecord(sl.LogRecords(), ev, now, key, count)
-		}
+	for _, q := range dnsQueries {
+		addDNSQueryLogRecord(sl.LogRecords(), q, now, pidByLocalAddr)
+	}
+	synAttempts.prune(now)
+	for _, ev := range synEvents {
+		key := synAttemptKeyFor(ev)
+		count := synAttempts.record(key, ev.At)
+		addSYNLogRecord(sl.LogRecords(), ev, now, key, count)
 	}
 
 	return ld
