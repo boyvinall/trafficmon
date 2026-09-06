@@ -32,6 +32,11 @@ const bpfFilter = "tcp or udp or icmp or icmp6 or arp"
 // check to reject an empty payload.
 const minPayloadDatagramLen = 120
 
+// statsSampleInterval bounds how often captureOn samples pcap.Handle.Stats()
+// per interface — cheap, but no reason to call it on every packet when the
+// read loop already wakes at least this often via readTimeout.
+const statsSampleInterval = time.Second
+
 // readTimeout bounds how long one read blocks inside libpcap.
 //
 // pcap.BlockForever would park the reader in libpcap while holding the
@@ -91,6 +96,26 @@ type Capturer struct {
 	// hostnameCache is the per-IP fallback: a flow with no hostname of its own
 	// can borrow the most recent one DPI found for the same remote IP.
 	hostnameCache *dpi.HostnameCache
+
+	// dnsQueries holds DNS query findings until the next DrainDNSQueries —
+	// unlike hostnameCache, these are never authoritative hostname data, so
+	// they get their own bounded buffer instead.
+	dnsQueries *dnsQueryRing
+
+	// synEvents holds SYN-only packets (connection attempts) until the next
+	// DrainSYNEvents.
+	synEvents *synEventRing
+
+	// rstEvents holds RST packets until the next DrainRSTEvents.
+	rstEvents *rstEventRing
+
+	// dnsErrors holds DNS error findings until the next DrainDNSErrors.
+	dnsErrors *dnsErrorRing
+
+	statsMu sync.Mutex
+	// packetStats holds each interface's most recently sampled pcap.Handle
+	// statistics, keyed by interface name.
+	packetStats map[string]PacketStats
 }
 
 // New creates a Capturer. It does not open the interface; call Run for that.
@@ -99,13 +124,55 @@ func New(cfg Config) *Capturer {
 		cfg:           cfg,
 		flows:         make(map[FlowKey]*ByteCounter),
 		hostnameCache: dpi.NewHostnameCache(dpi.DefaultHostnameCacheCapacity, dpi.DefaultHostnameCacheTTL),
+		dnsQueries:    newDNSQueryRing(),
+		synEvents:     newSYNEventRing(),
+		rstEvents:     newRSTEventRing(),
+		dnsErrors:     newDNSErrorRing(),
+		packetStats:   make(map[string]PacketStats),
 	}
+}
+
+// PacketStats returns a copy of each interface's most recently sampled pcap
+// statistics, keyed by interface name.
+func (c *Capturer) PacketStats() map[string]PacketStats {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+
+	out := make(map[string]PacketStats, len(c.packetStats))
+	for k, v := range c.packetStats {
+		out[k] = v
+	}
+	return out
 }
 
 // HostnameCache returns the per-IP hostname fallback cache DPI populates, for the
 // UI to consult when a connection has no hostname of its own.
 func (c *Capturer) HostnameCache() *dpi.HostnameCache {
 	return c.hostnameCache
+}
+
+// DrainDNSQueries returns every DNS query finding captured since the last
+// call and resets the buffer to empty.
+func (c *Capturer) DrainDNSQueries() []dpi.QueryFinding {
+	return c.dnsQueries.drain()
+}
+
+// DrainSYNEvents returns every SYN-only packet (connection attempt) captured
+// since the last call and resets the buffer to empty.
+func (c *Capturer) DrainSYNEvents() []SYNEvent {
+	return c.synEvents.drain()
+}
+
+// DrainRSTEvents returns every RST packet captured since the last call and
+// resets the buffer to empty.
+func (c *Capturer) DrainRSTEvents() []RSTEvent {
+	return c.rstEvents.drain()
+}
+
+// DrainDNSErrors returns every DNS error finding captured since the last call
+// and resets the buffer to empty.
+func (c *Capturer) DrainDNSErrors() []dpi.DNSErrorFinding {
+	return c.dnsErrors.drain()
 }
 
 // Run opens the interface and decodes packets into the flow table. If ctx is
@@ -170,9 +237,24 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		return fmt.Errorf("decode %s: %w", iface, err)
 	}
 
+	var lastStatsUpdate time.Time
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+
+		if shouldSampleStats(lastStatsUpdate, time.Now(), statsSampleInterval) {
+			lastStatsUpdate = time.Now()
+			if stats, err := handle.Stats(); err == nil {
+				c.statsMu.Lock()
+				c.packetStats[iface] = PacketStats{
+					Received:  stats.PacketsReceived,
+					Dropped:   stats.PacketsDropped,
+					IfDropped: stats.PacketsIfDropped,
+				}
+				c.statsMu.Unlock()
+			}
 		}
 
 		// Zero-copy is safe here because everything kept from the packet —
@@ -193,7 +275,7 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		if !ok {
 			continue
 		}
-		key, inbound, ok := normalise(info.Src, info.Dst, info.SrcPort, info.DstPort, info.Proto, isLocal)
+		key, inbound, ok := normalise(info.Src, info.Dst, info.SrcPort, info.DstPort, info.Proto, iface, isLocal)
 		if !ok {
 			continue
 		}
@@ -207,7 +289,35 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		ctr := c.record(key, ts, info.Bytes, inbound)
 		c.inspect(data, info, inbound, dec.linkType, key.RemoteAddr, ctr, ts)
 		c.inspectPassive(data, info, dec.linkType, ts)
+
+		if info.Proto == ProtoTCP && info.SYN && !info.ACK {
+			c.synEvents.push(SYNEvent{
+				Iface:      iface,
+				LocalAddr:  key.LocalAddr,
+				LocalPort:  key.LocalPort,
+				RemoteAddr: key.RemoteAddr,
+				RemotePort: key.RemotePort,
+				At:         ts,
+			})
+		}
+		if info.Proto == ProtoTCP && info.RST {
+			c.rstEvents.push(RSTEvent{
+				Iface:      iface,
+				LocalAddr:  key.LocalAddr,
+				LocalPort:  key.LocalPort,
+				RemoteAddr: key.RemoteAddr,
+				RemotePort: key.RemotePort,
+				At:         ts,
+			})
+		}
 	}
+}
+
+// shouldSampleStats reports whether at least interval has elapsed since
+// last, i.e. whether captureOn's read loop should call handle.Stats() again.
+// A zero last always samples immediately, for the first iteration.
+func shouldSampleStats(last, now time.Time, interval time.Duration) bool {
+	return last.IsZero() || now.Sub(last) >= interval
 }
 
 // record credits n bytes to a flow, creating its counter on first sight, and
@@ -392,6 +502,16 @@ func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.
 		for _, f := range insp.Inspect(payload) {
 			c.hostnameCache.Put(f.IP, f.Hostname, ts)
 		}
+		if qi, ok := insp.(dpi.QueryPassiveInspector); ok {
+			for _, f := range qi.InspectQuery(payload, info.Src.String(), info.Dst.String(), ts) {
+				c.dnsQueries.push(f)
+			}
+		}
+		if ei, ok := insp.(dpi.ErrorPassiveInspector); ok {
+			for _, f := range ei.InspectError(payload, info.Src.String(), ts) {
+				c.dnsErrors.push(f)
+			}
+		}
 	}
 }
 
@@ -483,6 +603,7 @@ func (c *Capturer) Snapshot(now time.Time) map[FlowKey]FlowStats {
 			RateOutBps: rOut,
 			LastSeen:   ctr.LastSeen(),
 			Hostname:   ctr.Hostname(),
+			Iface:      k.Iface,
 		}
 	}
 	return out
@@ -498,6 +619,17 @@ type FlowStats struct {
 	// Hostname is the hostname DPI identified for this flow, or "" if none
 	// has been found.
 	Hostname string
+	// Iface is the name of the interface this flow was captured on.
+	Iface string
+}
+
+// PacketStats is one interface's cumulative pcap statistics, sampled
+// periodically from pcap.Handle.Stats() — cumulative since the handle was
+// opened, so it maps directly onto a monotonic cumulative sum metric.
+type PacketStats struct {
+	Received  int
+	Dropped   int
+	IfDropped int
 }
 
 // ListInterfaces returns the interfaces libpcap can capture on. Requires root.

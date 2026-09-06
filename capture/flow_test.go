@@ -156,26 +156,26 @@ func TestNormalise(t *testing.T) {
 		{
 			name: "outbound v4 puts our address in the local fields",
 			src:  local4, dst: remote4, sport: 51000, dport: 443, proto: ProtoTCP,
-			wantKey: FlowKey{LocalAddr: local4, LocalPort: 51000, RemoteAddr: remote4, RemotePort: 443, Proto: ProtoTCP},
+			wantKey: FlowKey{LocalAddr: local4, LocalPort: 51000, RemoteAddr: remote4, RemotePort: 443, Proto: ProtoTCP, Iface: "eth0"},
 			wantOK:  true,
 		},
 		{
 			name: "inbound v4 folds onto the same key as the outbound half",
 			src:  remote4, dst: local4, sport: 443, dport: 51000, proto: ProtoTCP,
-			wantKey:     FlowKey{LocalAddr: local4, LocalPort: 51000, RemoteAddr: remote4, RemotePort: 443, Proto: ProtoTCP},
+			wantKey:     FlowKey{LocalAddr: local4, LocalPort: 51000, RemoteAddr: remote4, RemotePort: 443, Proto: ProtoTCP, Iface: "eth0"},
 			wantInbound: true,
 			wantOK:      true,
 		},
 		{
 			name: "outbound v6 udp",
 			src:  local6, dst: remote6, sport: 5353, dport: 53, proto: ProtoUDP,
-			wantKey: FlowKey{LocalAddr: local6, LocalPort: 5353, RemoteAddr: remote6, RemotePort: 53, Proto: ProtoUDP},
+			wantKey: FlowKey{LocalAddr: local6, LocalPort: 5353, RemoteAddr: remote6, RemotePort: 53, Proto: ProtoUDP, Iface: "eth0"},
 			wantOK:  true,
 		},
 		{
 			name: "inbound v6 udp",
 			src:  remote6, dst: local6, sport: 53, dport: 5353, proto: ProtoUDP,
-			wantKey:     FlowKey{LocalAddr: local6, LocalPort: 5353, RemoteAddr: remote6, RemotePort: 53, Proto: ProtoUDP},
+			wantKey:     FlowKey{LocalAddr: local6, LocalPort: 5353, RemoteAddr: remote6, RemotePort: 53, Proto: ProtoUDP, Iface: "eth0"},
 			wantInbound: true,
 			wantOK:      true,
 		},
@@ -184,7 +184,7 @@ func TestNormalise(t *testing.T) {
 			// gets its own row rather than the bytes being counted twice.
 			name: "loopback attributes to the sending side",
 			src:  loop4, dst: loop4, sport: 51000, dport: 8080, proto: ProtoTCP,
-			wantKey: FlowKey{LocalAddr: loop4, LocalPort: 51000, RemoteAddr: loop4, RemotePort: 8080, Proto: ProtoTCP},
+			wantKey: FlowKey{LocalAddr: loop4, LocalPort: 51000, RemoteAddr: loop4, RemotePort: 8080, Proto: ProtoTCP, Iface: "eth0"},
 			wantOK:  true,
 		},
 		{
@@ -200,14 +200,14 @@ func TestNormalise(t *testing.T) {
 		{
 			name: "multicast destination from us is still ours",
 			src:  local4, dst: mustAddr(t, "224.0.0.251"), sport: 5353, dport: 5353, proto: ProtoUDP,
-			wantKey: FlowKey{LocalAddr: local4, LocalPort: 5353, RemoteAddr: mustAddr(t, "224.0.0.251"), RemotePort: 5353, Proto: ProtoUDP},
+			wantKey: FlowKey{LocalAddr: local4, LocalPort: 5353, RemoteAddr: mustAddr(t, "224.0.0.251"), RemotePort: 5353, Proto: ProtoUDP, Iface: "eth0"},
 			wantOK:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key, inbound, ok := normalise(tt.src, tt.dst, tt.sport, tt.dport, tt.proto, isLocal)
+			key, inbound, ok := normalise(tt.src, tt.dst, tt.sport, tt.dport, tt.proto, "eth0", isLocal)
 			if ok != tt.wantOK {
 				t.Fatalf("normalise() ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -229,11 +229,11 @@ func TestNormaliseIsDirectionSymmetric(t *testing.T) {
 	remote := mustAddr(t, "93.184.216.34")
 	isLocal := func(a netip.Addr) bool { return a == local }
 
-	out, outInbound, ok := normalise(local, remote, 40000, 80, ProtoTCP, isLocal)
+	out, outInbound, ok := normalise(local, remote, 40000, 80, ProtoTCP, "eth0", isLocal)
 	if !ok {
 		t.Fatal("normalise() dropped an outbound packet")
 	}
-	in, inInbound, ok := normalise(remote, local, 80, 40000, ProtoTCP, isLocal)
+	in, inInbound, ok := normalise(remote, local, 80, 40000, ProtoTCP, "eth0", isLocal)
 	if !ok {
 		t.Fatal("normalise() dropped an inbound packet")
 	}
@@ -243,6 +243,32 @@ func TestNormaliseIsDirectionSymmetric(t *testing.T) {
 	}
 	if outInbound || !inInbound {
 		t.Fatalf("direction flags = (%v, %v), want (false, true)", outInbound, inInbound)
+	}
+}
+
+// TestFlowKeyIfaceDifferentiatesOtherwiseIdenticalFlows pins down the reason
+// FlowKey carries Iface at all: two flows with an identical 5-tuple, seen on
+// different interfaces (the primary interface and loopback, say), must not
+// collide into one entry.
+func TestFlowKeyIfaceDifferentiatesOtherwiseIdenticalFlows(t *testing.T) {
+	local := mustAddr(t, "127.0.0.1")
+	remote := mustAddr(t, "127.0.0.1")
+	isLocal := func(a netip.Addr) bool { return a == local }
+
+	primary, _, ok := normalise(local, remote, 51000, 8080, ProtoTCP, "en0", isLocal)
+	if !ok {
+		t.Fatal("normalise() dropped a packet it should have kept")
+	}
+	loopback, _, ok := normalise(local, remote, 51000, 8080, ProtoTCP, "lo0", isLocal)
+	if !ok {
+		t.Fatal("normalise() dropped a packet it should have kept")
+	}
+
+	if primary == loopback {
+		t.Fatalf("keys on different interfaces collided: %+v", primary)
+	}
+	if primary.Iface != "en0" || loopback.Iface != "lo0" {
+		t.Fatalf("Iface = (%q, %q), want (\"en0\", \"lo0\")", primary.Iface, loopback.Iface)
 	}
 }
 

@@ -669,6 +669,12 @@ func TestRefreshWiresBothSources(t *testing.T) {
 	if len(snap.Connections) != 0 {
 		t.Errorf("Refresh() on idle sources produced %d records, want 0", len(snap.Connections))
 	}
+	if len(snap.SYNEvents) != 0 {
+		t.Errorf("Refresh() on idle sources produced %d SYN events, want 0", len(snap.SYNEvents))
+	}
+	if len(snap.DNSQueries) != 0 {
+		t.Errorf("Refresh() on idle sources produced %d DNS queries, want 0", len(snap.DNSQueries))
+	}
 }
 
 // TestAggregatorRefreshIsSafeForConcurrentUse drives Refresh from many

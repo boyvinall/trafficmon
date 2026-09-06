@@ -27,6 +27,12 @@ type packetInfo struct {
 	DstPort uint16
 	Proto   Proto
 
+	// SYN, ACK and RST are the TCP flags of the same name, meaningful only
+	// when Proto is ProtoTCP — UDP/ICMP/ARP have no TCP flags to read.
+	SYN bool
+	ACK bool
+	RST bool
+
 	// Bytes is the size of the whole IP datagram — IP header, transport
 	// header and payload — taken from the IP header's own length field.
 	//
@@ -48,17 +54,29 @@ type packetInfo struct {
 // at any realistic SnapLen since the whole frame is smaller than the default.
 const arpFrameBytes = 28
 
+// tcpFlagSYN, tcpFlagACK and tcpFlagRST are the bit positions of the SYN,
+// ACK and RST flags within a TCP header's flags byte (offset 13).
+const (
+	tcpFlagSYN = 0x02
+	tcpFlagACK = 0x10
+	tcpFlagRST = 0x04
+)
+
 // transportPorts is a minimal DecodingLayer for TCP and UDP that reads the
-// source and destination ports and stops.
+// source and destination ports, plus (for TCP) the flags byte, and stops.
 //
 // gopacket's own layers.TCP decoder fails a packet whose options run past the
 // captured bytes, which would silently drop long-header packets from the flow
 // table whenever SnapLen is tight. Only the first four bytes of either header
-// matter here, and those two layouts agree on them, so one decoder serves
-// both and truncation stops mattering.
+// matter for the ports, and those two layouts agree on them, so one decoder
+// serves both and truncation stops mattering. flags is read from offset 13,
+// which exists in any packet not truncated inside the TCP header itself —
+// UDP's own bytes at that offset are unrelated (its length/checksum fields)
+// and are simply never consulted for a UDP packet; see decode's TCP case.
 type transportPorts struct {
-	src uint16
-	dst uint16
+	src   uint16
+	dst   uint16
+	flags byte
 }
 
 // DecodeFromBytes implements gopacket.DecodingLayer.
@@ -69,6 +87,9 @@ func (t *transportPorts) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback
 	}
 	t.src = binary.BigEndian.Uint16(data[0:2])
 	t.dst = binary.BigEndian.Uint16(data[2:4])
+	if len(data) >= 14 {
+		t.flags = data[13]
+	}
 	return nil
 }
 
@@ -173,6 +194,9 @@ func (d *flowDecoder) decode(data []byte) (packetInfo, bool) {
 
 		case layers.LayerTypeTCP:
 			info.Proto = ProtoTCP
+			info.SYN = d.ports.flags&tcpFlagSYN != 0
+			info.ACK = d.ports.flags&tcpFlagACK != 0
+			info.RST = d.ports.flags&tcpFlagRST != 0
 			haveTransport = true
 
 		case layers.LayerTypeUDP:

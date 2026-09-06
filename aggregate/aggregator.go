@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/boyvinall/trafficmon/capture"
+	"github.com/boyvinall/trafficmon/dpi"
 	"github.com/boyvinall/trafficmon/procinfo"
 )
 
@@ -93,6 +94,10 @@ type ConnectionRecord struct {
 	// Hostname is the hostname DPI identified for this connection's remote
 	// endpoint, or "" if none has been found.
 	Hostname string
+
+	// Iface is the name of the interface capture last saw this connection's
+	// traffic on, or "" if capture has never seen a packet for it.
+	Iface string
 
 	// LastPolled is when procinfo's socket enumeration last actually
 	// reported this connection. It drives Vanished and the grace-period
@@ -233,6 +238,18 @@ type Snapshot struct {
 	// build on.
 	At          time.Time
 	Connections []ConnectionRecord
+	// SYNEvents, RSTEvents, DNSQueries and DNSErrors are the capture-only
+	// event streams drained since the previous refresh — unlike Connections,
+	// these are not retained across ticks, so a consumer that skips a
+	// Refresh loses whatever accumulated in between.
+	SYNEvents  []capture.SYNEvent
+	RSTEvents  []capture.RSTEvent
+	DNSQueries []dpi.QueryFinding
+	DNSErrors  []dpi.DNSErrorFinding
+	// PacketStats is each capture interface's most recently sampled pcap
+	// statistics, keyed by interface name — unlike the event streams above,
+	// this is a point-in-time snapshot, not drained.
+	PacketStats map[string]capture.PacketStats
 }
 
 // Aggregator owns the shared state written by the capture and poller
@@ -265,6 +282,11 @@ func New(c *capture.Capturer, p procinfo.ConnectionSource) *Aggregator {
 func (a *Aggregator) Refresh(now time.Time) Snapshot {
 	conns := a.poll.Connections()
 	snap := a.join(conns, a.cap.Snapshot(now), now)
+	snap.SYNEvents = a.cap.DrainSYNEvents()
+	snap.RSTEvents = a.cap.DrainRSTEvents()
+	snap.DNSQueries = a.cap.DrainDNSQueries()
+	snap.DNSErrors = a.cap.DrainDNSErrors()
+	snap.PacketStats = a.cap.PacketStats()
 
 	// Drop the counters behind whatever can no longer possibly be on
 	// screen. The capture side never forgets a flow on its own, so without
@@ -316,6 +338,17 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 	records := make(map[connKey]ConnectionRecord, len(conns))
 	seen := make(map[connKey]bool, len(conns))
 
+	// procinfo's socket enumeration has no notion of which interface a
+	// connection's traffic crosses, so flowKey below can never set FlowKey's
+	// Iface field. Index flows the same way, stripped of their own Iface, so
+	// the lookup still finds them regardless of which interface capture saw
+	// them on.
+	flowsByAddr := make(map[capture.FlowKey]capture.FlowStats, len(flows))
+	for fk, st := range flows {
+		fk.Iface = ""
+		flowsByAddr[fk] = st
+	}
+
 	for _, c := range conns {
 		key := connKey{
 			pid:        c.PID,
@@ -352,11 +385,12 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			RemotePort: c.RemotePort,
 			Proto:      protoFromString(c.Proto),
 		}
-		if st, ok := flows[flowKey]; ok {
+		if st, ok := flowsByAddr[flowKey]; ok {
 			rec.BytesInTotal, rec.BytesOutTotal = st.BytesIn, st.BytesOut
 			rec.RateInBps, rec.RateOutBps = st.RateInBps, st.RateOutBps
 			rec.LastSeen = st.LastSeen
 			rec.Hostname = st.Hostname
+			rec.Iface = st.Iface
 		}
 
 		records[key] = rec
@@ -400,6 +434,7 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			RateOutBps:    st.RateOutBps,
 			LastSeen:      st.LastSeen,
 			Hostname:      st.Hostname,
+			Iface:         st.Iface,
 			FirstSeen:     firstSeen,
 		}
 	}

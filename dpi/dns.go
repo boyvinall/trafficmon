@@ -1,6 +1,8 @@
 package dpi
 
 import (
+	"time"
+
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 )
@@ -44,6 +46,29 @@ func (d *DNSAnswerInspector) Inspect(payload []byte) (findings []HostnameFinding
 			continue
 		}
 		findings = append(findings, HostnameFinding{IP: a.IP.String(), Hostname: string(a.Name)})
+	}
+	return findings
+}
+
+// InspectError implements ErrorPassiveInspector. payload is one complete DNS
+// message, decoded independently of Inspect's own decode of the same bytes —
+// the same second-decode style QueryPassiveInspector already uses.
+func (d *DNSAnswerInspector) InspectError(payload []byte, serverAddr string, at time.Time) (findings []DNSErrorFinding) {
+	defer recoverPanic()
+
+	var msg layers.DNS
+	if err := msg.DecodeFromBytes(payload, gopacket.NilDecodeFeedback); err != nil || !msg.QR || msg.ResponseCode == layers.DNSResponseCodeNoErr {
+		return nil
+	}
+
+	for _, q := range msg.Questions {
+		findings = append(findings, DNSErrorFinding{
+			Name:       string(q.Name),
+			QType:      q.Type.String(),
+			RCode:      msg.ResponseCode.String(),
+			ServerAddr: serverAddr,
+			At:         at,
+		})
 	}
 	return findings
 }

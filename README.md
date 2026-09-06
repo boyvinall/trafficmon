@@ -61,16 +61,43 @@ on macOS, `/proc` on Linux).
 |---------|------|
 | `capture/` | gopacket/libpcap live capture, flow keys, rate windowing |
 | `procinfo/` | per-OS open-socket enumeration incl. TCP state (cgo `libproc` on macOS, `/proc` parsing on Linux) |
-| `dpi/` | pluggable deep-packet inspection: TLS/QUIC ClientHello SNI, plus a DNS-answer inspector feeding the hostname cache |
+| `dpi/` | pluggable deep-packet inspection: TLS/QUIC ClientHello SNI, plus DNS-answer and DNS-query inspectors |
 | `aggregate/` | mutex-protected shared state, traffic join, per-grouping rollups |
 | `dns/` | async reverse DNS with an aggressive cache |
 | `cmd/trafficmon/internal/tui/` | Bubble Tea model, key bindings, table, styles |
+| `receiver/` | OpenTelemetry receiver wrapping the engine — metrics and logs, no TUI |
+| `cmd/otel-collector/` | custom OTel Collector distribution bundling `receiver/` |
 
-`capture/`, `procinfo/`, `dpi/`, `aggregate/` and `dns/` form the core engine library; `cmd/trafficmon` is the TUI binary built on top of it.
+`capture/`, `procinfo/`, `dpi/`, `aggregate/` and `dns/` form the core engine
+library, consumed by both the TUI binary (`cmd/trafficmon`) and the
+OpenTelemetry receiver (`receiver/`).
+
+## OpenTelemetry
+
+`receiver/` exposes the same engine data as OTel metrics and logs instead of
+a TUI: `trafficmon.network.io`, `trafficmon.dns.query.count`, and
+`trafficmon.network.syn.count` metrics, plus DNS-query and SYN-attempt log
+records (each SYN record carries a rolling attempt count for its exact
+local/remote 4-tuple over the trailing 3 minutes).
+
+`cmd/otel-collector/` builds a runnable Collector distribution around it:
+
+```sh
+make build-otel-collector          # regenerate + compile bin/trafficmon-otelcol
+sudo bin/trafficmon-otelcol --config cmd/otel-collector/config.yaml
+```
+
+Or try the minimal example (trafficmon receiver → debug for logs, prometheus
+for metrics on `localhost:9464`):
+
+```sh
+cmd/otel-collector/config/run.sh
+```
 
 ## Development
 
 ```sh
-make help    # list targets
-make all     # build, lint, test
+make help                # list targets
+make all                 # build both binaries, lint, test — every module
+make build-otel-collector  # just the OTel Collector distribution
 ```

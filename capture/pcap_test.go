@@ -650,3 +650,27 @@ func TestCapturerEvictConcurrentWithRecord(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestShouldSampleStats(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name string
+		last time.Time
+		now  time.Time
+		want bool
+	}{
+		{name: "zero last always samples", last: time.Time{}, now: now, want: true},
+		{name: "before interval elapsed", last: now, now: now.Add(500 * time.Millisecond), want: false},
+		{name: "interval elapsed", last: now, now: now.Add(time.Second), want: true},
+		{name: "well past interval", last: now, now: now.Add(5 * time.Second), want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldSampleStats(tt.last, tt.now, time.Second); got != tt.want {
+				t.Errorf("shouldSampleStats(%v, %v, 1s) = %v, want %v", tt.last, tt.now, got, tt.want)
+			}
+		})
+	}
+}
