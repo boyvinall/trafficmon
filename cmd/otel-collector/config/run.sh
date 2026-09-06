@@ -9,4 +9,5 @@ repo_root=$(cd "$script_dir/../../.." && pwd)
 
 make -C "$repo_root" build-otel-collector
 
+set -x
 exec sudo "$repo_root/bin/trafficmon-otelcol" --config "$script_dir/example.yaml"
