@@ -75,6 +75,12 @@ type Config struct {
 	// on — DNS answers being the obvious source — fed straight into
 	// HostnameCache. Nil or empty disables passive DPI entirely.
 	PassiveInspectors []dpi.PassiveInspector
+
+	// EnableLogFeed allocates the streaming SYN/DNS-query log feed (see
+	// LogFeed) alongside the existing drop-oldest ring buffers. Left false
+	// by default so the feed costs nothing — not even an unread channel —
+	// when nothing is consuming it.
+	EnableLogFeed bool
 }
 
 // DefaultConfig returns the capture defaults.
@@ -112,6 +118,10 @@ type Capturer struct {
 	// dnsErrors holds DNS error findings until the next DrainDNSErrors.
 	dnsErrors *dnsErrorRing
 
+	// logFeed streams SYN/DNS-query events to a consumer in real time,
+	// nil unless cfg.EnableLogFeed is set — see logFeed's doc comment.
+	logFeed *logFeed
+
 	statsMu sync.Mutex
 	// packetStats holds each interface's most recently sampled pcap.Handle
 	// statistics, keyed by interface name.
@@ -120,7 +130,7 @@ type Capturer struct {
 
 // New creates a Capturer. It does not open the interface; call Run for that.
 func New(cfg Config) *Capturer {
-	return &Capturer{
+	c := &Capturer{
 		cfg:           cfg,
 		flows:         make(map[FlowKey]*ByteCounter),
 		hostnameCache: dpi.NewHostnameCache(dpi.DefaultHostnameCacheCapacity, dpi.DefaultHostnameCacheTTL),
@@ -130,6 +140,10 @@ func New(cfg Config) *Capturer {
 		dnsErrors:     newDNSErrorRing(),
 		packetStats:   make(map[string]PacketStats),
 	}
+	if cfg.EnableLogFeed {
+		c.logFeed = newLogFeed()
+	}
+	return c
 }
 
 // PacketStats returns a copy of each interface's most recently sampled pcap
@@ -173,6 +187,25 @@ func (c *Capturer) DrainRSTEvents() []RSTEvent {
 // and resets the buffer to empty.
 func (c *Capturer) DrainDNSErrors() []dpi.DNSErrorFinding {
 	return c.dnsErrors.drain()
+}
+
+// LogFeed returns the streaming SYN/DNS-query channels a logs consumer can
+// read from directly, as an alternative to the slower Drain*-based ring
+// buffers. ok is false when cfg.EnableLogFeed wasn't set, distinguishing
+// "disabled" from "enabled but currently empty".
+func (c *Capturer) LogFeed() (syn <-chan SYNEvent, dnsQuery <-chan dpi.QueryFinding, ok bool) {
+	if c.logFeed == nil {
+		return nil, nil, false
+	}
+	return c.logFeed.syn, c.logFeed.dnsQuery, true
+}
+
+// LogFeedOverflow passes through the log feed's cumulative drop counts, or
+func (c *Capturer) LogFeedOverflow() (syn, dnsQuery uint64) {
+	if c.logFeed == nil {
+		return 0, 0
+	}
+	return c.logFeed.overflow()
 }
 
 // Run opens the interface and decodes packets into the flow table. If ctx is
@@ -291,14 +324,18 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 		c.inspectPassive(data, info, dec.linkType, ts)
 
 		if info.Proto == ProtoTCP && info.SYN && !info.ACK {
-			c.synEvents.push(SYNEvent{
+			ev := SYNEvent{
 				Iface:      iface,
 				LocalAddr:  key.LocalAddr,
 				LocalPort:  key.LocalPort,
 				RemoteAddr: key.RemoteAddr,
 				RemotePort: key.RemotePort,
 				At:         ts,
-			})
+			}
+			c.synEvents.push(ev)
+			if c.logFeed != nil {
+				c.logFeed.sendSYN(ev)
+			}
 		}
 		if info.Proto == ProtoTCP && info.RST {
 			c.rstEvents.push(RSTEvent{
@@ -505,6 +542,9 @@ func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.
 		if qi, ok := insp.(dpi.QueryPassiveInspector); ok {
 			for _, f := range qi.InspectQuery(payload, info.Src.String(), info.Dst.String(), ts) {
 				c.dnsQueries.push(f)
+				if c.logFeed != nil {
+					c.logFeed.sendDNSQuery(f)
+				}
 			}
 		}
 		if ei, ok := insp.(dpi.ErrorPassiveInspector); ok {

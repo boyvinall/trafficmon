@@ -19,6 +19,7 @@ import (
 
 	"github.com/boyvinall/trafficmon/aggregate"
 	"github.com/boyvinall/trafficmon/capture"
+	"github.com/boyvinall/trafficmon/dpi"
 	"github.com/boyvinall/trafficmon/procinfo"
 )
 
@@ -40,6 +41,13 @@ type trafficmonReceiver struct {
 	refs            int
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+
+	// pidMu guards pidByLocalAddr, published wholesale by collect after
+	// each Refresh and read by forwardLogs — its own mutex, per this
+	// repo's convention for every shared map, rather than piggybacking on
+	// mu (which guards consumer/lifecycle state instead).
+	pidMu          sync.Mutex
+	pidByLocalAddr map[string]int32
 }
 
 func newTrafficmonReceiver(set receiver.Settings, cfg *Config) *trafficmonReceiver {
@@ -74,6 +82,7 @@ func (r *trafficmonReceiver) Start(_ context.Context, _ component.Host) error {
 	capCfg := capture.DefaultConfig()
 	capCfg.Interface = iface
 	capCfg.IncludeLoopback = r.cfg.IncludeLoopback
+	capCfg.EnableLogFeed = r.logsConsumer != nil
 
 	capturer := capture.New(capCfg)
 	source := procinfo.NewBestSource()
@@ -98,17 +107,28 @@ func (r *trafficmonReceiver) Start(_ context.Context, _ component.Host) error {
 		r.collect(ctx, agg)
 	}()
 
+	if r.logsConsumer != nil {
+		r.wg.Add(1)
+		logsConsumer := r.logsConsumer
+		go func() {
+			defer r.wg.Done()
+			r.forwardLogs(ctx, capturer, logsConsumer)
+		}()
+	}
+
 	return nil
 }
 
 // collect ticks at cfg.CollectionInterval, translating each
-// aggregate.Snapshot into metrics/logs for whichever consumers are set.
+// aggregate.Snapshot into metrics for the metrics consumer, if set. It also
+// republishes pidByLocalAddr after every Refresh for forwardLogs to consult
+// — logs delivery itself is handled by forwardLogs, off capturer's own
+// streaming feed, not by this tick.
 func (r *trafficmonReceiver) collect(ctx context.Context, agg *aggregate.Aggregator) {
 	ticker := time.NewTicker(r.cfg.CollectionInterval)
 	defer ticker.Stop()
 
 	state := newMetricsState(time.Now())
-	synAttempts := newSYNAttemptCache()
 
 	for {
 		select {
@@ -119,9 +139,10 @@ func (r *trafficmonReceiver) collect(ctx context.Context, agg *aggregate.Aggrega
 
 		now := time.Now()
 		snap := agg.Refresh(now)
+		r.publishPidByLocalAddr(pidByLocalAddrFrom(snap.Connections))
 
 		r.mu.Lock()
-		metricsConsumer, logsConsumer := r.metricsConsumer, r.logsConsumer
+		metricsConsumer := r.metricsConsumer
 		r.mu.Unlock()
 
 		if metricsConsumer != nil {
@@ -129,9 +150,97 @@ func (r *trafficmonReceiver) collect(ctx context.Context, agg *aggregate.Aggrega
 				r.logger.Error("consume metrics", zap.Error(err))
 			}
 		}
-		if logsConsumer != nil {
-			if err := logsConsumer.ConsumeLogs(ctx, buildLogs(snap, now, synAttempts)); err != nil {
-				r.logger.Error("consume logs", zap.Error(err))
+	}
+}
+
+// publishPidByLocalAddr replaces pidByLocalAddr wholesale — never patched in
+// place, so a reader in forwardLogs always sees either the previous
+// snapshot or the new one, never a partially-updated map.
+func (r *trafficmonReceiver) publishPidByLocalAddr(m map[string]int32) {
+	r.pidMu.Lock()
+	r.pidByLocalAddr = m
+	r.pidMu.Unlock()
+}
+
+// currentPidByLocalAddr returns the map most recently published by collect.
+func (r *trafficmonReceiver) currentPidByLocalAddr() map[string]int32 {
+	r.pidMu.Lock()
+	defer r.pidMu.Unlock()
+	return r.pidByLocalAddr
+}
+
+// logFlushInterval bounds how long a SYN/DNS-query log record can sit in
+// forwardLogs's pending batch before being exported — it governs export
+// call frequency and latency only, unlike collect's ticker, which also
+// gates when an event is picked up at all.
+const logFlushInterval = 200 * time.Millisecond
+
+// logBatchCap flushes forwardLogs's pending batch early, ahead of
+// logFlushInterval, once it grows this large — bounding one export call's
+// size during a sustained burst rather than growing it unbounded until the
+// next tick.
+const logBatchCap = 500
+
+// logFeedSource is the slice of *capture.Capturer forwardLogs depends on —
+// narrowed to an interface so a test can drive forwardLogs off channels it
+// controls directly, without a live pcap handle.
+type logFeedSource interface {
+	LogFeed() (syn <-chan capture.SYNEvent, dnsQuery <-chan dpi.QueryFinding, ok bool)
+	LogFeedOverflow() (syn, dnsQuery uint64)
+}
+
+// forwardLogs streams SYN/DNS-query events from source's non-blocking log
+// feed to logsConsumer as they occur, batched only enough to bound export
+// call frequency (logFlushInterval) and size (logBatchCap) — unlike
+// collect's metrics tick, an event's delivery latency is not tied to
+// cfg.CollectionInterval. It returns once ctx is cancelled, or immediately
+// if source's log feed isn't enabled.
+func (r *trafficmonReceiver) forwardLogs(ctx context.Context, source logFeedSource, logsConsumer consumer.Logs) {
+	synCh, dnsCh, ok := source.LogFeed()
+	if !ok {
+		return
+	}
+
+	synAttempts := newSYNAttemptCache()
+	flushTicker := time.NewTicker(logFlushInterval)
+	defer flushTicker.Stop()
+
+	var pendingSYN []capture.SYNEvent
+	var pendingDNS []dpi.QueryFinding
+	var lastSYNOverflow, lastDNSOverflow uint64
+
+	flush := func() {
+		if len(pendingSYN) == 0 && len(pendingDNS) == 0 {
+			return
+		}
+		batch := buildLogBatch(pendingSYN, pendingDNS, time.Now(), synAttempts, r.currentPidByLocalAddr())
+		pendingSYN, pendingDNS = nil, nil
+		if err := logsConsumer.ConsumeLogs(ctx, batch); err != nil {
+			r.logger.Error("consume logs", zap.Error(err))
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-synCh:
+			pendingSYN = append(pendingSYN, ev)
+			if len(pendingSYN)+len(pendingDNS) >= logBatchCap {
+				flush()
+			}
+		case q := <-dnsCh:
+			pendingDNS = append(pendingDNS, q)
+			if len(pendingSYN)+len(pendingDNS) >= logBatchCap {
+				flush()
+			}
+		case <-flushTicker.C:
+			flush()
+			if syn, dnsQuery := source.LogFeedOverflow(); syn != lastSYNOverflow || dnsQuery != lastDNSOverflow {
+				r.logger.Warn("dropped log events: consumer or channel too slow",
+					zap.Uint64("syn_dropped", syn-lastSYNOverflow),
+					zap.Uint64("dns_query_dropped", dnsQuery-lastDNSOverflow))
+				lastSYNOverflow, lastDNSOverflow = syn, dnsQuery
 			}
 		}
 	}

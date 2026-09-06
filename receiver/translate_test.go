@@ -357,16 +357,14 @@ func TestBuildMetricsPacketsDropped(t *testing.T) {
 
 func TestBuildLogsDNSQuery(t *testing.T) {
 	now := time.Now()
-	snap := aggregate.Snapshot{
-		Connections: []aggregate.ConnectionRecord{
-			{PID: 999, LocalAddr: "10.0.0.5", LocalPort: 55000},
-		},
-		DNSQueries: []dpi.QueryFinding{
-			{Name: "example.com.", QType: "A", ClientAddr: "10.0.0.5", ServerAddr: "8.8.8.8", At: now},
-		},
+	pidByLocalAddr := pidByLocalAddrFrom([]aggregate.ConnectionRecord{
+		{PID: 999, LocalAddr: "10.0.0.5", LocalPort: 55000},
+	})
+	dnsQueries := []dpi.QueryFinding{
+		{Name: "example.com.", QType: "A", ClientAddr: "10.0.0.5", ServerAddr: "8.8.8.8", At: now},
 	}
 
-	ld := buildLogs(snap, now, newSYNAttemptCache())
+	ld := buildLogBatch(nil, dnsQueries, now, newSYNAttemptCache(), pidByLocalAddr)
 	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 	if records.Len() != 1 {
 		t.Fatalf("log record count = %d, want 1", records.Len())
@@ -385,13 +383,11 @@ func TestBuildLogsDNSQuery(t *testing.T) {
 
 func TestBuildLogsDNSQueryUnattributed(t *testing.T) {
 	now := time.Now()
-	snap := aggregate.Snapshot{
-		DNSQueries: []dpi.QueryFinding{
-			{Name: "example.com.", QType: "A", ClientAddr: "10.0.0.9", ServerAddr: "8.8.8.8", At: now},
-		},
+	dnsQueries := []dpi.QueryFinding{
+		{Name: "example.com.", QType: "A", ClientAddr: "10.0.0.9", ServerAddr: "8.8.8.8", At: now},
 	}
 
-	ld := buildLogs(snap, now, newSYNAttemptCache())
+	ld := buildLogBatch(nil, dnsQueries, now, newSYNAttemptCache(), nil)
 	lr := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
 	if _, ok := lr.Attributes().Get("network.local.address"); ok {
 		t.Error("network.local.address should be omitted when no connection matches the client address")
@@ -408,7 +404,7 @@ func TestBuildLogsSYN(t *testing.T) {
 		RemotePort: 443,
 		At:         now,
 	}
-	ld := buildLogs(aggregate.Snapshot{SYNEvents: []capture.SYNEvent{ev}}, now, newSYNAttemptCache())
+	ld := buildLogBatch([]capture.SYNEvent{ev}, nil, now, newSYNAttemptCache(), nil)
 	records := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 	if records.Len() != 1 {
 		t.Fatalf("log record count = %d, want 1", records.Len())
@@ -425,10 +421,11 @@ func TestBuildLogsSYN(t *testing.T) {
 	}
 }
 
-// TestBuildLogsSYNAttemptCount drives buildLogs across several ticks sharing
-// one synAttemptCache, as collect() does, and checks the attempt count it
-// attaches tracks repeats to the same 4-tuple, stays independent per
-// 4-tuple, and forgets attempts once they've aged out of synAttemptWindow.
+// TestBuildLogsSYNAttemptCount drives buildLogBatch across several calls
+// sharing one synAttemptCache, as forwardLogs does across flushes, and
+// checks the attempt count it attaches tracks repeats to the same 4-tuple,
+// stays independent per 4-tuple, and forgets attempts once they've aged out
+// of synAttemptWindow.
 func TestBuildLogsSYNAttemptCount(t *testing.T) {
 	cache := newSYNAttemptCache()
 	base := time.Now()
@@ -440,7 +437,7 @@ func TestBuildLogsSYNAttemptCount(t *testing.T) {
 	other.RemotePort = 8443
 
 	attemptCount := func(ev capture.SYNEvent, now time.Time) int64 {
-		ld := buildLogs(aggregate.Snapshot{SYNEvents: []capture.SYNEvent{ev}}, now, cache)
+		ld := buildLogBatch([]capture.SYNEvent{ev}, nil, now, cache, nil)
 		lr := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
 		got, _ := lr.Attributes().Get(metadata.AttrSYNAttemptCount)
 		return got.Int()
