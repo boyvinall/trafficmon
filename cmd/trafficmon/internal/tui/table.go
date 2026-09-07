@@ -21,7 +21,7 @@ type SortKey uint8
 const (
 	SortRate SortKey = iota
 	SortTotal
-	SortConnections
+	SortPID
 
 	// numSortKeys bounds the `s` cycle, so a new key only has to be added
 	// above. It must stay last.
@@ -35,8 +35,8 @@ func (k SortKey) next() SortKey { return (k + 1) % numSortKeys }
 //
 // The plan gives `r` the narrower job of choosing which of the two bandwidth
 // numbers drives the order, so it flips between rate and total and treats the
-// connection-count sort — which is neither — as "not one of mine", landing on
-// rate. `s` remains the way to reach every key in turn.
+// PID sort — which is neither — as "not one of mine", landing on rate. `s`
+// remains the way to reach every key in turn.
 func (k SortKey) toggleRate() SortKey {
 	if k == SortRate {
 		return SortTotal
@@ -49,22 +49,24 @@ func (k SortKey) String() string {
 	switch k {
 	case SortTotal:
 		return "total"
-	case SortConnections:
-		return "connections"
+	case SortPID:
+		return "pid"
 	default:
 		return "rate"
 	}
 }
 
-// sortRows orders rows by the active sort key, descending.
+// sortRows orders rows by the active sort key: rate and total descending,
+// busiest first; PID ascending, lowest first, matching how every other tool
+// that lists processes orders them.
 func sortRows(rows []aggregate.Row, k SortKey) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		switch k {
 		case SortTotal:
 			return a.BytesInTotal+a.BytesOutTotal > b.BytesInTotal+b.BytesOutTotal
-		case SortConnections:
-			return a.Connections > b.Connections
+		case SortPID:
+			return a.PID < b.PID
 		default: // SortRate
 			return a.RateInBps+a.RateOutBps > b.RateInBps+b.RateOutBps
 		}
@@ -99,6 +101,62 @@ func filterRows(rows []aggregate.Row, q string, hostname func(aggregate.Row) str
 		if hostname != nil && strings.Contains(strings.ToLower(hostname(r)), q) {
 			out = append(out, r)
 		}
+	}
+	return out
+}
+
+// listenState is the TCP kernel state name every platform's procinfo backend
+// reports for a socket accepting connections rather than carrying one — see
+// procinfo's per-OS tcpStateName implementations.
+const listenState = "LISTEN"
+
+// filterListening keeps every row when show is true; otherwise it drops rows
+// whose connection is in the LISTEN state — a socket that only ever accepts
+// connections carries no traffic of its own to watch.
+//
+// Only the ungrouped view ever sets Row.State (see aggregate.Row's grouped
+// constructors), so a grouped view is unaffected either way: there is nothing
+// for this to drop until `g` cycles back to ungrouped.
+//
+// The result is built into rows[:0], reusing rows' backing array in place,
+// the same trade filterRows makes and for the same reason.
+func filterListening(rows []aggregate.Row, show bool) []aggregate.Row {
+	if show {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		if r.State != listenState {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// filterProto keeps rows whose transport protocol is currently shown,
+// dropping tcp rows when showTCP is false and udp rows when showUDP is
+// false. A row of any other protocol (icmp, arp, or "" on a grouped view
+// that never sets Row.Proto — see aggregate.Row's grouped constructors) is
+// unaffected by either flag: neither toggle claims to speak for it.
+func filterProto(rows []aggregate.Row, showTCP, showUDP bool) []aggregate.Row {
+	if showTCP && showUDP {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		switch r.Proto {
+		case "tcp":
+			if !showTCP {
+				continue
+			}
+		case "udp":
+			if !showUDP {
+				continue
+			}
+		}
+		out = append(out, r)
 	}
 	return out
 }
@@ -151,8 +209,10 @@ const (
 	connWidth     = 5
 	// stateWidth fits "ESTABLISHED", the longest name tcpStateName returns.
 	stateWidth = 11
-	// protoWidth fits "ICMP", the longest label protoLabel returns.
-	protoWidth = 4
+	// protoWidth fits "PROTO", the column's own title — one cell wider than
+	// "ICMP", the longest label protoLabel returns, so the header itself
+	// never has to truncate.
+	protoWidth = 5
 	// ageWidth fits "999d23h", the longest string humanDuration returns.
 	ageWidth = 7
 
@@ -387,6 +447,8 @@ func pidColumn() column {
 			}
 			return strconv.Itoa(int(r.PID))
 		},
+		sortable:  true,
+		sortKey:   SortPID,
 		truncLeft: true,
 	}
 }
@@ -404,7 +466,9 @@ func protoLabel(r aggregate.Row) string {
 
 // connColumn builds the CONN column, shown only once a grouping can roll more
 // than one connection into a row — ungrouped, Connections is always 1 and the
-// column would say nothing.
+// column would say nothing. It is display-only: sorting by connection count
+// is exactly what left ties falling back to PID order feel like a hidden PID
+// sort, so PID is now the explicit sort key instead (see pidColumn).
 func connColumn() column {
 	return column{
 		title:     "CONN",
@@ -412,8 +476,6 @@ func connColumn() column {
 		align:     alignRight,
 		prio:      prioConnections,
 		cell:      func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
-		sortable:  true,
-		sortKey:   SortConnections,
 		truncLeft: true,
 	}
 }

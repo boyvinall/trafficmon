@@ -25,9 +25,14 @@ const TickInterval = time.Second
 // appName is the title shown at the left of the header bar.
 const appName = "trafficmon"
 
-// chromeLines is how many lines View spends on furniture rather than data: the
-// header bar, the column titles and the footer.
-const chromeLines = 3
+// chromeLines is how many lines View spends on furniture rather than data:
+// the panel's top and bottom border, the header line inside it, the column
+// titles, and the footer below the panel.
+const chromeLines = 5
+
+// panelTitle is the connections panel's border-inlaid title — the first of
+// what will grow into several bordered panels sharing renderPanel's look.
+const panelTitle = "Connections"
 
 // defaultPageSize is how far PgUp/PgDn move the cursor before the terminal
 // height is known and a real screenful can be measured.
@@ -95,7 +100,11 @@ type Model struct {
 	// The zero value, aggregate.GroupNone, is what NewModel starts with:
 	// one row per open connection.
 	grouping aggregate.Grouping
-	sort     SortKey
+	// sort is the column driving row order, cycled with `s`. NewModel starts
+	// it on SortPID rather than the zero value SortRate: which process is
+	// which stays put from one refresh to the next, unlike rate or total,
+	// so the table doesn't reshuffle itself the moment traffic starts.
+	sort SortKey
 
 	// snap is the most recent aggregator snapshot, kept so that a change of
 	// mode, grouping, sort or filter can rebuild the table from it on the very
@@ -129,6 +138,18 @@ type Model struct {
 	// one.
 	filterBefore string
 
+	// showListening says whether rows for TCP sockets in the LISTEN state are
+	// shown. It starts true — every socket enumeration already reported them,
+	// so hiding them is an opt-in narrowing, not the default — and `l` flips
+	// it. Only the ungrouped view ever sets Row.State (see aggregate.Row's
+	// grouped constructors), so a grouped view is unaffected either way.
+	showListening bool
+	// showTCP and showUDP say whether rows for each transport protocol are
+	// shown, toggled independently by `t` and `u`. Both start true for the
+	// same reason showListening does, and are just as much a no-op on a
+	// grouped view: only the ungrouped view ever sets Row.Proto.
+	showTCP, showUDP bool
+
 	width, height int
 }
 
@@ -156,6 +177,10 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 		styles:        DefaultStyles(),
 		help:          help.New(),
 		input:         input,
+		showListening: true,
+		showTCP:       true,
+		showUDP:       true,
+		sort:          SortPID,
 	}
 }
 
@@ -299,6 +324,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Filter):
 		return m, m.openFilter()
 
+	case key.Matches(msg, m.keys.ToggleListening):
+		m.toggleListening()
+	case key.Matches(msg, m.keys.ToggleTCP):
+		m.toggleTCP()
+	case key.Matches(msg, m.keys.ToggleUDP):
+		m.toggleUDP()
+
 	case key.Matches(msg, m.keys.Pause):
 		m.paused = !m.paused
 	case key.Matches(msg, m.keys.Help):
@@ -425,6 +457,28 @@ func (m *Model) setSort(k SortKey) {
 	m.rebuild()
 }
 
+// toggleListening flips whether LISTEN-state rows are shown, redrawing
+// immediately rather than waiting for the next tick — the same immediacy
+// grouping and sort changes get.
+func (m *Model) toggleListening() {
+	m.showListening = !m.showListening
+	m.rebuild()
+}
+
+// toggleTCP flips whether TCP rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleTCP() {
+	m.showTCP = !m.showTCP
+	m.rebuild()
+}
+
+// toggleUDP flips whether UDP rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleUDP() {
+	m.showUDP = !m.showUDP
+	m.rebuild()
+}
+
 // refresh pulls a fresh snapshot from the aggregator and rebuilds the table
 // from it.
 func (m *Model) refresh(now time.Time) {
@@ -452,6 +506,8 @@ func (m *Model) refresh(now time.Time) {
 // exercised with hand-built inputs, no live capture and no root.
 func (m *Model) rebuild() {
 	rows := aggregate.Rows(m.snap, m.grouping)
+	rows = filterListening(rows, m.showListening)
+	rows = filterProto(rows, m.showTCP, m.showUDP)
 	rows = filterRows(rows, m.filter, m.resolveHostname)
 	sortRows(rows, m.sort)
 	m.setRows(rows)
@@ -510,16 +566,19 @@ func clamp(v, lo, hi int) int {
 	return min(max(v, lo), hi)
 }
 
-// View renders the header bar, the table (or the help overlay in its place)
-// and the footer as one frame no taller than the terminal.
+// View renders the header bar and the table (or the help overlay in its
+// place) inside a bordered panel, with the footer below it, as one frame no
+// taller than the terminal.
 func (m Model) View() string {
-	lines := []string{m.viewHeader()}
+	body := []string{m.viewHeader()}
 	if m.showHelp {
-		lines = append(lines, m.viewHelp()...)
+		body = append(body, m.viewHelp()...)
 	} else {
-		lines = append(lines, m.viewTable()...)
+		body = append(body, m.viewTable()...)
 	}
-	lines = append(lines, m.viewFooter())
+
+	panel := renderPanel(m.styles, panelTitle, m.viewWidth(), len(body)+panelBorderHeight, strings.Join(body, "\n"))
+	lines := append(strings.Split(panel, "\n"), m.viewFooter())
 
 	// Nothing may be wider than the terminal, and the pieces cannot all
 	// guarantee that themselves: the column layout has a floor it refuses to
@@ -561,29 +620,52 @@ func (m Model) viewHeader() string {
 	// and a stronger one: rows silently absent from the table look exactly
 	// like traffic that stopped, and unlike the sort there is no mark
 	// anywhere else on the screen to give it away.
-	label := "sort: " + m.sort.String() + " · " + m.iface + " ·"
+	label := "sort: " + m.sort.String() + " · " + m.iface
 	if m.filter != "" {
 		label = "filter: " + truncate(m.filter, maxFilterLabel) + " · " + label
 	}
-	status := m.styles.Breadcrumb.Render(label)
+	status := m.styles.Header.Render(label)
 
-	// The capture flag is the other half of the right-hand end, and the two
-	// are kept apart because they are not equally expendable: the sort and
-	// interface are said elsewhere on the screen, whereas a frozen table looks
-	// exactly like a live one that has gone quiet and only this says which.
-	flag := m.styles.Breadcrumb.Render(" live")
-	if m.paused {
-		flag = m.styles.Paused.Render(" PAUSED ")
+	onOff := func(enable bool, on, off string) string {
+		if enable {
+			return m.styles.Live.Render(on)
+		}
+		return m.styles.Paused.Render(off)
 	}
-	right := status + flag
 
-	return joinEnds(left, right, m.viewWidth())
+	right := strings.Join([]string{
+		status,
+		onOff(m.showListening, "LISTEN", "!LISTEN"),
+		onOff(m.showTCP, "TCP", "!TCP"),
+		onOff(m.showUDP, "UDP", "!UDP"),
+		onOff(!m.paused, "live", "PAUSED"),
+	}, " · ")
+
+	return joinEnds(left, right, m.contentWidth())
+}
+
+// hiddenProtos names whichever of tcp/udp is currently switched off, for the
+// header bar — "" when both are shown. Rows silently missing from the table
+// look exactly like traffic that stopped, so whatever caused that is worth
+// naming in the one place a filter and the listening toggle are already
+// named.
+func hiddenProtos(showTCP, showUDP bool) string {
+	switch {
+	case !showTCP && !showUDP:
+		return "tcp+udp"
+	case !showTCP:
+		return "tcp"
+	case !showUDP:
+		return "udp"
+	default:
+		return ""
+	}
 }
 
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
-	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname, m.now), m.viewWidth())
+	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname, m.now), m.contentWidth())
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {
@@ -623,7 +705,7 @@ func (m Model) emptyBody() string {
 func (m Model) viewHelp() []string {
 	h := m.help
 	h.ShowAll = true
-	h.Width = m.viewWidth()
+	h.Width = m.contentWidth()
 
 	helpLines := strings.Split(h.FullHelpView(m.keys.FullHelp()), "\n")
 	lines := make([]string, 0, 2+len(helpLines))
@@ -720,6 +802,13 @@ func (m Model) viewWidth() int {
 		return defaultWidth
 	}
 	return m.width
+}
+
+// contentWidth is the width available to whatever renders inside the
+// panel — the header line and the table — once renderPanel's own border and
+// padding have taken their share of viewWidth.
+func (m Model) contentWidth() int {
+	return clamp(m.viewWidth()-panelBorderWidth, 1, m.viewWidth())
 }
 
 // visibleWindow returns the half-open range of rows to draw so that the cursor

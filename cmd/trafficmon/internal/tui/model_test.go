@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +62,8 @@ func TestViewHeader(t *testing.T) {
 					t.Errorf("header %q should not contain %q", got, unwanted)
 				}
 			}
-			if w := lipgloss.Width(got); w != 100 {
-				t.Errorf("header width = %d, want 100", w)
+			if w, want := lipgloss.Width(got), m.contentWidth(); w != want {
+				t.Errorf("header width = %d, want %d", w, want)
 			}
 		})
 	}
@@ -183,7 +184,7 @@ func TestClosedRowsRenderDimmed(t *testing.T) {
 	m.cursor = -1
 
 	lines := strings.Split(m.View(), "\n")
-	live, closed := lines[3], lines[4] // "Google Chrome Helper" and "launchd"
+	live, closed := lines[4], lines[5] // "Google Chrome Helper" and "launchd"
 
 	if !strings.Contains(closed, "launchd") || !strings.Contains(live, "Google Chrome Helper") {
 		t.Fatalf("unexpected row order:\n%s", m.View())
@@ -192,8 +193,8 @@ func TestClosedRowsRenderDimmed(t *testing.T) {
 		t.Fatalf("fixture is wrong: launchd should be closed and Chrome live")
 	}
 
-	if strings.Contains(live, "\x1b[") {
-		t.Errorf("a live row should carry no styling, got %q", live)
+	if strings.Contains(live, "\x1b[2m") {
+		t.Errorf("a live row should not render faint, got %q", live)
 	}
 	if !strings.Contains(closed, "\x1b[2m") {
 		t.Errorf("a closed row should render faint, got %q", closed)
@@ -213,11 +214,11 @@ func TestSelectedRowIsHighlighted(t *testing.T) {
 	m.cursor = 1
 
 	lines := strings.Split(m.View(), "\n")
-	if !strings.Contains(lines[3], "\x1b[7m") {
-		t.Errorf("the row under the cursor should be inverted, got %q", lines[3])
+	if !strings.Contains(lines[4], "\x1b[7m") {
+		t.Errorf("the row under the cursor should be inverted, got %q", lines[4])
 	}
-	if strings.Contains(lines[2], "\x1b[7m") {
-		t.Errorf("only the row under the cursor should be inverted, got %q", lines[2])
+	if strings.Contains(lines[3], "\x1b[7m") {
+		t.Errorf("only the row under the cursor should be inverted, got %q", lines[3])
 	}
 }
 
@@ -254,9 +255,9 @@ func TestDefaultStylesRenderTheirAttributes(t *testing.T) {
 	}{
 		{name: "Header is bold", style: s.Header, codes: []string{"1"}},
 		{name: "Breadcrumb is faint", style: s.Breadcrumb, codes: []string{"2"}},
-		{name: "Footer is faint", style: s.Footer, codes: []string{"2"}},
-		{name: "ColumnHeader is bold and underlined", style: s.ColumnHeader, codes: []string{"1", "4"}},
-		{name: "Paused is bold and reversed", style: s.Paused, codes: []string{"1", "7"}},
+		{name: "Footer is bold", style: s.Footer, codes: []string{"1"}},
+		{name: "ColumnHeader is bold", style: s.ColumnHeader, codes: []string{"1"}},
+		{name: "Paused is bold", style: s.Paused, codes: []string{"1"}},
 	}
 
 	for _, tc := range tests {
@@ -300,7 +301,7 @@ func TestVisibleWindow(t *testing.T) {
 }
 
 func TestViewScrollsToKeepCursorVisible(t *testing.T) {
-	m := newTestModel(processRows(), 100, 7) // room for four rows
+	m := newTestModel(processRows(), 100, 7) // room for two rows
 	m.cursor = 4
 
 	got := trimRight(m.View())
@@ -478,8 +479,10 @@ func TestSetRowsHoldsTheCursorOnItsRow(t *testing.T) {
 
 func TestCursorFollowsItsRowAcrossARefresh(t *testing.T) {
 	m := newLiveModel()
+	m.sort = SortRate
+	m.rebuild()
 
-	// sshd is last by rate, which is the default sort.
+	// sshd is last by rate.
 	m.cursor = len(m.rows) - 1
 	if got := m.rows[m.cursor].Label; got != "sshd" {
 		t.Fatalf("fixture puts %q last, want sshd", got)
@@ -512,7 +515,7 @@ func TestUpdateSortCycling(t *testing.T) {
 	// `s` walks every sort key in turn and wraps back to where it started.
 	m := newLiveModel()
 
-	want := []SortKey{SortTotal, SortConnections, SortRate}
+	want := []SortKey{SortRate, SortTotal, SortPID}
 	for i, k := range want {
 		m, _ = press(t, m, "s")
 		if m.sort != k {
@@ -529,9 +532,9 @@ func TestUpdateRateSortToggle(t *testing.T) {
 	}{
 		{name: "rate to total", from: SortRate, want: SortTotal},
 		{name: "total back to rate", from: SortTotal, want: SortRate},
-		// `s` and `r` drive the same sort key, so `r` from the connections
-		// sort `s` reached lands on rate rather than doing nothing.
-		{name: "connections to rate", from: SortConnections, want: SortRate},
+		// `s` and `r` drive the same sort key, so `r` from the PID sort `s`
+		// reached lands on rate rather than doing nothing.
+		{name: "pid to rate", from: SortPID, want: SortRate},
 	}
 
 	for _, tc := range tests {
@@ -551,20 +554,20 @@ func TestSortIsVisibleInTheView(t *testing.T) {
 	m := newLiveModel()
 
 	// The column carrying the sort is marked, so the row order is explained
-	// where the user is already looking.
-	if got := m.View(); !strings.Contains(got, sortMarker+"↓ RATE") {
-		t.Errorf("the rate columns are not marked as the sort:\n%s", got)
+	// where the user is already looking. PID is the default sort.
+	if got := m.View(); !strings.Contains(got, sortMarker+"PID") {
+		t.Errorf("the PID column is not marked as the sort:\n%s", got)
 	}
 
 	m, _ = press(t, m, "s")
 	got := m.View()
-	if !strings.Contains(got, sortMarker+"↓ TOTAL") || strings.Contains(got, sortMarker+"↓ RATE") {
-		t.Errorf("the marker did not move to the total columns:\n%s", got)
+	if !strings.Contains(got, sortMarker+"↓ RATE") || strings.Contains(got, sortMarker+"PID") {
+		t.Errorf("the marker did not move to the rate columns:\n%s", got)
 	}
 
 	// And named in the header, which is the only place left once a narrow
 	// terminal has dropped the column it marks.
-	if !strings.Contains(got, "sort: total") {
+	if !strings.Contains(got, "sort: rate") {
 		t.Errorf("the header does not name the sort:\n%s", got)
 	}
 }
@@ -637,7 +640,7 @@ func TestUpdatePauseFreezesTheTable(t *testing.T) {
 	// Changing the sort while paused still reorders what is on screen: it
 	// re-reads the frozen snapshot rather than asking for a new one.
 	m, _ = press(t, m, "s")
-	if !strings.Contains(m.View(), "sort: total") || !m.now.Equal(before) {
+	if !strings.Contains(m.View(), "sort: rate") || !m.now.Equal(before) {
 		t.Errorf("a paused sort change did not redraw, or thawed the clock:\n%s", m.View())
 	}
 
@@ -721,9 +724,9 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 // modelState is everything a keypress can observably change, rendered so that
 // a test can tell "the model reacted" from "the model did not".
 func modelState(m Model, cmd tea.Cmd) string {
-	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t filter=%q filtering=%t quit=%t",
+	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t quit=%t",
 		m.grouping, m.sort, m.cursor,
-		rowLabels(m), m.paused, m.showHelp, m.filter, m.filtering, cmd != nil)
+		rowLabels(m), m.paused, m.showHelp, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, cmd != nil)
 }
 
 // rowLabels is the labels of the rows on screen, in order.
@@ -828,7 +831,7 @@ func TestStateColumnHiddenWhenGrouped(t *testing.T) {
 	// GroupByPID and GroupByProcessName both roll up per remote endpoint, so
 	// REMOTE and HOSTNAME still mean something and must appear; STATE does
 	// not, since a grouped row can roll up more than one connection's state.
-	m := newTestModel(processRows(), 120, 12)
+	m := newTestModel(processRows(), 124, 12)
 	m.grouping = aggregate.GroupByPID
 
 	got := m.View()
@@ -839,6 +842,94 @@ func TestStateColumnHiddenWhenGrouped(t *testing.T) {
 		if !strings.Contains(got, wanted) {
 			t.Errorf("grouped view is missing its %s column:\n%s", wanted, got)
 		}
+	}
+}
+
+func TestToggleListeningHidesAndRestoresListenRows(t *testing.T) {
+	snap := testSnapshot()
+	snap.Connections = append(snap.Connections, aggregate.ConnectionRecord{
+		PID: 8080, ProcessName: "nginx", LocalPort: 8080, Proto: "tcp", State: listenState, LastSeen: testNow,
+	})
+
+	m := newTestModel(nil, 200, 12)
+	m.snap = snap
+	m.rebuild()
+
+	if !m.showListening {
+		t.Fatalf("the model should show listening sockets by default")
+	}
+	if got := rowLabels(m); len(got) != 4 {
+		t.Fatalf("rows = %v, want every fixture row (three connections plus nginx) before toggling", got)
+	}
+
+	m, _ = press(t, m, "l")
+	if m.showListening {
+		t.Fatalf("l did not hide listening sockets")
+	}
+	if got := rowLabels(m); len(got) != 3 || slices.Contains(got, "nginx") {
+		t.Errorf("rows = %v, want the LISTEN row dropped", got)
+	}
+	if !strings.Contains(m.View(), "!LISTEN") {
+		t.Errorf("header does not say listening sockets are hidden:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "l")
+	if !m.showListening {
+		t.Fatalf("l did not restore listening sockets")
+	}
+	if got := rowLabels(m); len(got) != 4 {
+		t.Errorf("rows = %v, want every fixture row restored", got)
+	}
+}
+
+func TestToggleTCPAndUDPHideEachProtocolIndependently(t *testing.T) {
+	snap := aggregate.Snapshot{
+		At: testNow,
+		Connections: []aggregate.ConnectionRecord{
+			{PID: 412, ProcessName: "curl", LocalPort: 51000, RemoteAddr: "1.2.3.4", RemotePort: 443, Proto: "tcp", LastSeen: testNow},
+			{PID: 22, ProcessName: "resolver", LocalPort: 51001, RemoteAddr: "8.8.8.8", RemotePort: 53, Proto: "udp", LastSeen: testNow},
+		},
+	}
+
+	m := newTestModel(nil, 200, 12)
+	m.snap = snap
+	m.rebuild()
+	total := len(m.rows)
+	if total != 2 {
+		t.Fatalf("setup has %d rows, want 2 (one tcp, one udp)", total)
+	}
+
+	m, _ = press(t, m, "t")
+	if m.showTCP {
+		t.Fatalf("t did not hide tcp")
+	}
+	for _, r := range m.rows {
+		if r.Proto == "tcp" {
+			t.Errorf("a tcp row survived hiding tcp: %+v", r)
+		}
+	}
+	if !strings.Contains(m.View(), "!TCP") {
+		t.Errorf("header does not say tcp is hidden:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "u")
+	if m.showUDP {
+		t.Fatalf("u did not hide udp")
+	}
+	if len(m.rows) != 0 {
+		t.Errorf("rows = %v, want none once both protocols are hidden", rowLabels(m))
+	}
+	if !strings.Contains(m.View(), "!TCP") || !strings.Contains(m.View(), "!UDP") {
+		t.Errorf("header does not say both protocols are hidden:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "t")
+	m, _ = press(t, m, "u")
+	if !m.showTCP || !m.showUDP {
+		t.Fatalf("toggling twice did not restore both protocols")
+	}
+	if len(m.rows) != total {
+		t.Errorf("rows = %v, want every row restored", rowLabels(m))
 	}
 }
 
@@ -909,7 +1000,7 @@ func TestFilterInputCapturesKeystrokes(t *testing.T) {
 	if m.showHelp {
 		t.Errorf("typing \"?\" into the filter opened the help overlay")
 	}
-	if m.sort != SortRate {
+	if m.sort != SortPID {
 		t.Errorf("typing into the filter changed the sort to %s", m.sort)
 	}
 	if m.grouping != aggregate.GroupNone {
@@ -1096,12 +1187,17 @@ func TestFilterIsVisibleWhileItIsInForce(t *testing.T) {
 func TestFilterHeaderTruncatesALongFilter(t *testing.T) {
 	// The filter is the one part of the status bar the user types, so it is
 	// the one part that could otherwise shove everything else off the line.
+	//
+	// Widened past newLiveModel's default 100 columns: the header also carries
+	// the LISTEN/TCP/UDP toggles and the live/paused flag, and at 100 columns
+	// those alone leave no room left for even a fully truncated filter.
 	m := newLiveModel()
+	m.width = 150
 	m.filter = strings.Repeat("x", 200)
 
 	got := m.viewHeader()
-	if w := lipgloss.Width(got); w != 100 {
-		t.Errorf("header width = %d, want 100", w)
+	if w, want := lipgloss.Width(got), m.contentWidth(); w != want {
+		t.Errorf("header width = %d, want %d", w, want)
 	}
 	if !strings.Contains(got, "…") {
 		t.Errorf("a 200-character filter was not truncated:\n%s", got)

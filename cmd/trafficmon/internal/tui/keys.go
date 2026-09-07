@@ -9,37 +9,43 @@ import "github.com/charmbracelet/bubbles/key"
 // and help overlay are rendered from the same values, so a key cannot be
 // advertised without being wired up or rebound in only one of the two places.
 type KeyMap struct {
-	Up       key.Binding
-	Down     key.Binding
-	PageUp   key.Binding
-	PageDown key.Binding
-	Home     key.Binding
-	End      key.Binding
-	Grouping key.Binding
-	Sort     key.Binding
-	RateSort key.Binding
-	Filter   key.Binding
-	Pause    key.Binding
-	Help     key.Binding
-	Quit     key.Binding
+	Up              key.Binding
+	Down            key.Binding
+	PageUp          key.Binding
+	PageDown        key.Binding
+	Home            key.Binding
+	End             key.Binding
+	Grouping        key.Binding
+	Sort            key.Binding
+	RateSort        key.Binding
+	Filter          key.Binding
+	ToggleListening key.Binding
+	ToggleTCP       key.Binding
+	ToggleUDP       key.Binding
+	Pause           key.Binding
+	Help            key.Binding
+	Quit            key.Binding
 }
 
 // DefaultKeyMap returns the standard bindings.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
-		Up:       key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:     key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		PageUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+b"), key.WithHelp("pgup", "page up")),
-		PageDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+f"), key.WithHelp("pgdn", "page down")),
-		Home:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
-		End:      key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("end/G", "bottom")),
-		Grouping: key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "cycle grouping")),
-		Sort:     key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "cycle sort")),
-		RateSort: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rate/total")),
-		Filter:   key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Pause:    key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
-		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:              key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:            key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		PageUp:          key.NewBinding(key.WithKeys("pgup", "ctrl+b"), key.WithHelp("pgup", "page up")),
+		PageDown:        key.NewBinding(key.WithKeys("pgdown", "ctrl+f"), key.WithHelp("pgdn", "page down")),
+		Home:            key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
+		End:             key.NewBinding(key.WithKeys("end", "G"), key.WithHelp("end/G", "bottom")),
+		Grouping:        key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "cycle grouping")),
+		Sort:            key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "cycle sort")),
+		RateSort:        key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "rate/total")),
+		Filter:          key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		ToggleListening: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "toggle listening")),
+		ToggleTCP:       key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle tcp")),
+		ToggleUDP:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "toggle udp")),
+		Pause:           key.NewBinding(key.WithKeys("p", " "), key.WithHelp("p/space", "pause")),
+		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
@@ -58,7 +64,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.Grouping, k.Sort, k.RateSort, k.Filter},
+		{k.Grouping, k.Sort, k.RateSort, k.Filter, k.ToggleListening, k.ToggleTCP, k.ToggleUDP},
 		{k.Pause, k.Help, k.Quit},
 	}
 }

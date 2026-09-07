@@ -25,6 +25,7 @@ cmd/otel-collector/components.go
 cmd/otel-collector/main.go
 cmd/otel-collector/main_others.go
 cmd/otel-collector/main_windows.go
+cmd/otel-collector/otel-collector
 
 *.md
 !README.md

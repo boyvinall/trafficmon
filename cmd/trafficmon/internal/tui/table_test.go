@@ -499,7 +499,7 @@ func TestTableHeaderMarksTheSortedColumns(t *testing.T) {
 		// the columns they read are marked.
 		{name: "rate", k: SortRate, marked: []string{"↓ RATE", "↑ RATE"}},
 		{name: "total", k: SortTotal, marked: []string{"↓ TOTAL", "↑ TOTAL"}},
-		{name: "connections", k: SortConnections, marked: []string{"CONN"}},
+		{name: "pid", k: SortPID, marked: []string{"PID"}},
 	}
 
 	cols := fitColumns(tableColumns(aggregate.GroupByPID, nil, testNow), 100)
@@ -558,9 +558,9 @@ func TestSortKeyToggleRate(t *testing.T) {
 	}{
 		{name: "rate to total", from: SortRate, want: SortTotal},
 		{name: "total back to rate", from: SortTotal, want: SortRate},
-		// `r` chooses between the two bandwidth numbers, and the connection
-		// count is neither, so it lands on rate rather than doing nothing.
-		{name: "connections lands on rate", from: SortConnections, want: SortRate},
+		// `r` chooses between the two bandwidth numbers, and PID is neither,
+		// so it lands on rate rather than doing nothing.
+		{name: "pid lands on rate", from: SortPID, want: SortRate},
 	}
 
 	for _, tc := range tests {
@@ -580,7 +580,9 @@ func TestSortRowsByKey(t *testing.T) {
 	}{
 		{name: "rate", k: SortRate, want: []string{"412", "980", "22", "-1", "1"}},
 		{name: "total", k: SortTotal, want: []string{"412", "980", "22", "-1", "1"}},
-		{name: "connections", k: SortConnections, want: []string{"412", "980", "-1", "22", "1"}},
+		// PID sorts ascending, lowest first, unlike rate/total's busiest-first
+		// descending order.
+		{name: "pid", k: SortPID, want: []string{"-1", "1", "22", "412", "980"}},
 	}
 
 	for _, tc := range tests {
@@ -634,12 +636,12 @@ func TestFitColumnsDropsHostnameThenStateThenPID(t *testing.T) {
 			// a wide terminal spends its extra cells on all of them.
 			name: "roomy", width: 200,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 29,
+			labelWidth: 28,
 		},
 		{
 			name: "typical", width: 140,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 14,
+			labelWidth: 13,
 		},
 		{
 			// The hostname goes before everything else, because it is the
@@ -648,12 +650,12 @@ func TestFitColumnsDropsHostnameThenStateThenPID(t *testing.T) {
 			// without it.
 			name: "hostname dropped first", width: 129,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 15,
+			labelWidth: 14,
 		},
 		{
 			name: "state dropped second", width: 117,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 14,
+			labelWidth: 15,
 		},
 		{
 			name: "proto dropped third", width: 104,
