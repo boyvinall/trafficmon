@@ -288,10 +288,11 @@ func udpTable(family uint32) ([]Socket, error) {
 		rows := unsafe.Slice((*mibUDP6RowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries) //nolint:gosec // buf is sized and populated by GetExtendedUdpTable to hold exactly numEntries rows
 		for _, r := range rows {
 			s := Socket{
-				PID:       int32(r.OwningPID),
-				LocalAddr: netip.AddrFrom16(r.LocalAddr).Unmap(),
-				LocalPort: swapPort(r.LocalPort),
-				Proto:     "udp",
+				PID:        int32(r.OwningPID),
+				LocalAddr:  netip.AddrFrom16(r.LocalAddr).Unmap(),
+				LocalPort:  swapPort(r.LocalPort),
+				RemoteAddr: netip.IPv6Unspecified(),
+				Proto:      "udp",
 			}
 			if s.LocalPort != 0 {
 				out = append(out, s)
@@ -303,10 +304,11 @@ func udpTable(family uint32) ([]Socket, error) {
 	rows := unsafe.Slice((*mibUDPRowOwnerPID)(unsafe.Pointer(&buf[4])), numEntries) //nolint:gosec // buf is sized and populated by GetExtendedUdpTable to hold exactly numEntries rows
 	for _, r := range rows {
 		s := Socket{
-			PID:       int32(r.OwningPID),
-			LocalAddr: ipv4Addr(r.LocalAddr),
-			LocalPort: swapPort(r.LocalPort),
-			Proto:     "udp",
+			PID:        int32(r.OwningPID),
+			LocalAddr:  ipv4Addr(r.LocalAddr),
+			LocalPort:  swapPort(r.LocalPort),
+			RemoteAddr: netip.IPv4Unspecified(),
+			Proto:      "udp",
 		}
 		if s.LocalPort != 0 {
 			out = append(out, s)
