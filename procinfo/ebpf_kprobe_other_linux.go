@@ -1,18 +1,17 @@
-//go:build linux && !arm64
+//go:build linux && !amd64 && !arm64
 
 package procinfo
 
 import "errors"
 
-// attachKprobeConnect is a stub on every architecture except arm64:
-// procinfo/bpf/kprobe's generated bindings are currently arm64-only (bpf2go
-// couldn't produce an amd64 struct pt_regs layout from this dev
-// environment's aarch64-sourced vmlinux.h -- see
-// procinfo/bpf/kprobe/gen_linux.go), so the kprobe/kretprobe fallback is
-// best-effort/arm64-only for now, not a bug to fix here. On a kernel
+// attachKprobeConnect is a stub on every architecture except amd64/arm64:
+// procinfo/bpf/kprobe only has a real per-arch vmlinux.h (needed for
+// BPF_KPROBE/BPF_KRETPROBE's direct struct pt_regs reads -- see
+// procinfo/bpf/kprobe/gen_linux.go) for those two, so the kprobe/kretprobe
+// fallback is best-effort there for now, not a bug to fix here. On a kernel
 // without BTF fentry/fexit support, this leaves eBPF attach entirely
 // unavailable on this architecture and NewEBPFSource returns an error, so
 // the caller falls back to *procinfo.Poller as usual.
 func (s *EBPFSource) attachKprobeConnect() error {
-	return errors.New("kprobe/kretprobe fallback is not available on this architecture (arm64-only for now)")
+	return errors.New("kprobe/kretprobe fallback is not available on this architecture (amd64/arm64 only for now)")
 }

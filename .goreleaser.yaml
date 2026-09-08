@@ -1,7 +1,7 @@
 version: 2
 
 builds:
-  - id: trafficmon
+  - id: trafficmon-darwin
     dir: cmd/trafficmon
     main: .
     binary: trafficmon
@@ -9,12 +9,33 @@ builds:
       - CGO_ENABLED=1
     goos:
       - darwin
-      - linux
     goarch:
       - amd64
       - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: trafficmon-linux
+    dir: cmd/trafficmon
+    main: .
+    binary: trafficmon
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # netgo forces Go's pure-Go DNS resolver instead of cgo's getaddrinfo,
+    # independently of the static libc link below -- dns.Resolver's reverse
+    # lookups then behave the same on every distro's musl/glibc.
+    tags:
+      - netgo
+    # Static link (built inside a musl/Alpine container, see release.yml) so
+    # the binary carries no glibc symbol-versioning floor and needs no
+    # libpcap.so on the target -- it runs unmodified on any Linux kernel new
+    # enough for the syscalls it uses, regardless of the distro's own libc.
+    ldflags:
+      - -s -w -X main.version={{.Version}} -linkmode external -extldflags "-static"
   - id: trafficmon-windows
     dir: cmd/trafficmon
     main: .
@@ -30,7 +51,7 @@ builds:
 
 archives:
   - id: trafficmon
-    ids: [trafficmon, trafficmon-windows]
+    ids: [trafficmon-darwin, trafficmon-linux, trafficmon-windows]
     formats: [binary]
     name_template: "{{ .Binary }}-{{ .Os }}-{{ .Arch }}"
 

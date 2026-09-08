@@ -77,11 +77,11 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	// Forces any pcap-open failure (most notably a missing libpcap on Linux)
-	// to surface here and exit cleanly, rather than racing the TUI goroutine
-	// that would otherwise be the first thing to open a handle. Kept
-	// unconditional (not folded into ResolveInterfaces below) because a
-	// literal --iface value never itself touches libpcap to resolve.
+	// Forces any pcap-open failure to surface here and exit cleanly, rather
+	// than racing the TUI goroutine that would otherwise be the first thing
+	// to open a handle. Kept unconditional (not folded into
+	// ResolveInterfaces below) because a literal --iface value never itself
+	// touches libpcap to resolve.
 	if _, err := capture.ListInterfaces(); err != nil {
 		return fmt.Errorf("libpcap: %w", err)
 	}

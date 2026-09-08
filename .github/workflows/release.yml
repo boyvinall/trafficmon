@@ -34,12 +34,6 @@ jobs:
           - os: macos-15-intel
             goos: darwin
             goarch: amd64
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-          - os: ubuntu-24.04-arm
-            goos: linux
-            goarch: arm64
           - os: windows-latest
             goos: windows
             goarch: amd64
@@ -52,17 +46,6 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - name: Install libpcap (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libpcap-dev
-      - name: Install BPF toolchain (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y clang llvm libbpf-dev
-      - name: Generate eBPF bindings (Linux)
-        if: runner.os == 'Linux'
-        run: make bpf-generate
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -90,8 +73,54 @@ jobs:
           path: out/trafficmon-${{ matrix.goos }}-${{ matrix.goarch }}.zip
           if-no-files-found: error
 
+  # Built inside Alpine (musl) rather than the ubuntu-latest/-arm runners
+  # directly: a static, netgo-tagged binary compiled here carries no glibc
+  # symbol-versioning floor and no libpcap.so runtime dependency, so it runs
+  # unmodified on any Linux distro/kernel new enough for the syscalls it
+  # uses -- not just whatever glibc happened to be on the build host.
+  build-linux:
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goarch: amd64
+          - os: ubuntu-24.04-arm
+            goarch: arm64
+    runs-on: ${{ matrix.os }}
+    container: golang:1.22-alpine
+    steps:
+      - name: Install build dependencies
+        run: apk add --no-cache gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash jq p7zip
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+      - name: Generate eBPF bindings
+        run: make bpf-generate
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: build --single-target --clean --id trafficmon-linux
+      - name: Locate built binary
+        id: bin
+        shell: bash
+        run: echo "path=$(jq -r '.[] | select(.type=="Binary") | .path' dist/artifacts.json)" >> "$GITHUB_OUTPUT"
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "${{ steps.bin.outputs.path }}" trafficmon
+          7z a -tzip "out/trafficmon-linux-${{ matrix.goarch }}.zip" trafficmon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trafficmon-linux-${{ matrix.goarch }}
+          path: out/trafficmon-linux-${{ matrix.goarch }}.zip
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, build-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

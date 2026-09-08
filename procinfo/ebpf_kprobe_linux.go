@@ -1,4 +1,4 @@
-//go:build linux && arm64
+//go:build linux && (amd64 || arm64)
 
 package procinfo
 
@@ -31,11 +31,10 @@ func decodeKprobeEvent(raw []byte) (ebpfEvent, error) {
 
 // attachKprobeConnect attaches the kprobe/kretprobe fallback for outbound
 // TCP connects, used when fentry/fexit isn't available (no BTF, or its
-// attach failed). arm64-only: procinfo/bpf/kprobe's generated bindings are
-// currently arm64-only -- see procinfo/bpf/kprobe/gen_linux.go's comment on
-// why an amd64 object can't be produced from this dev environment's
-// aarch64-sourced vmlinux.h -- see ebpf_kprobe_other_linux.go for the stub
-// every other architecture builds instead.
+// attach failed). Built for amd64 and arm64, the two architectures
+// procinfo/bpf/kprobe has a real per-arch vmlinux.h for (see
+// procinfo/bpf/kprobe/gen_linux.go) -- see ebpf_kprobe_other_linux.go for
+// the stub every other architecture builds instead.
 func (s *EBPFSource) attachKprobeConnect() error {
 	var objs kprobe.KprobeObjects
 	if err := kprobe.LoadKprobeObjects(&objs, nil); err != nil {
