@@ -200,7 +200,7 @@ type Model struct {
 	showPrivate bool
 
 	// events is the events panel's own bounded history, appended to at the
-	// end of every refresh — see appendEvents. Snapshot itself drops its four
+	// end of every refresh — see appendEvents. Snapshot itself drops its five
 	// event streams on the very next Refresh, so this ring is the only place
 	// they are retained across ticks.
 	events eventRing
@@ -208,6 +208,14 @@ type Model struct {
 	// the connections table's cursor: the two panels are scrolled separately
 	// even though only one of them has focus at a time.
 	eventsCursor int
+	// eventsWindowTop is the index of the first row the events panel currently
+	// shows. Unlike the connections table (which recomputes its window purely
+	// from the cursor via visibleWindow, re-anchoring the cursor to whichever
+	// edge it crosses), the events panel keeps this as its own state so the
+	// cursor can move freely within an already-visible window — the window
+	// itself only shifts once the cursor would otherwise leave it. See
+	// eventsWindowStart.
+	eventsWindowTop int
 	// focus says which panel movement keys act on. zoomed gives that panel
 	// the full height (border kept) and hides the other entirely; Esc
 	// (Unzoom) is the only way back out, since FocusNext is a no-op while
@@ -588,14 +596,17 @@ func (m *Model) moveSelection(delta int) {
 }
 
 // moveEventsCursor moves the events panel's own cursor by delta, clamping at
-// both ends the same way moveCursor does for the connections table.
+// both ends the same way moveCursor does for the connections table, then
+// brings eventsWindowTop along just far enough to keep the cursor visible.
 func (m *Model) moveEventsCursor(delta int) {
 	n := m.events.len()
 	if n == 0 {
 		m.eventsCursor = 0
+		m.eventsWindowTop = 0
 		return
 	}
 	m.eventsCursor = clamp(m.eventsCursor+delta, 0, n-1)
+	m.eventsWindowTop = eventsWindowStart(m.eventsWindowTop, m.eventsCursor, n, m.eventsRowLines())
 }
 
 // selectionLen is how many rows the focused panel's cursor moves against —
@@ -839,7 +850,7 @@ func (m *Model) refresh(now time.Time) {
 	}
 
 	snap := m.agg.Refresh(now)
-	// Copied out before m.snap is overwritten: Refresh drains these four
+	// Copied out before m.snap is overwritten: Refresh drains these five
 	// streams fresh every call and does not retain them (see Snapshot's own
 	// doc comment), so this is the only chance to keep anything that
 	// accumulated since the previous tick.

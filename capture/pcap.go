@@ -117,6 +117,9 @@ type Capturer struct {
 	// dnsErrors holds DNS error findings until the next DrainDNSErrors.
 	dnsErrors *dnsErrorRing
 
+	// dnsAnswers holds DNS answer findings until the next DrainDNSAnswers.
+	dnsAnswers *dnsAnswerRing
+
 	// logFeed streams SYN/DNS-query events to a consumer in real time,
 	// nil unless cfg.EnableLogFeed is set — see logFeed's doc comment.
 	logFeed *logFeed
@@ -137,6 +140,7 @@ func New(cfg Config) *Capturer {
 		synEvents:     newSYNEventRing(),
 		rstEvents:     newRSTEventRing(),
 		dnsErrors:     newDNSErrorRing(),
+		dnsAnswers:    newDNSAnswerRing(),
 		packetStats:   make(map[string]PacketStats),
 	}
 	if cfg.EnableLogFeed {
@@ -186,6 +190,12 @@ func (c *Capturer) DrainRSTEvents() []RSTEvent {
 // and resets the buffer to empty.
 func (c *Capturer) DrainDNSErrors() []dpi.DNSErrorFinding {
 	return c.dnsErrors.drain()
+}
+
+// DrainDNSAnswers returns every DNS answer finding captured since the last
+// call and resets the buffer to empty.
+func (c *Capturer) DrainDNSAnswers() []dpi.DNSAnswerFinding {
+	return c.dnsAnswers.drain()
 }
 
 // LogFeed returns the streaming SYN/DNS-query channels a logs consumer can
@@ -552,6 +562,11 @@ func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.
 		if ei, ok := insp.(dpi.ErrorPassiveInspector); ok {
 			for _, f := range ei.InspectError(payload, info.Src.String(), ts) {
 				c.dnsErrors.push(f)
+			}
+		}
+		if ai, ok := insp.(dpi.AnswerPassiveInspector); ok {
+			for _, f := range ai.InspectAnswer(payload, info.Src.String(), ts) {
+				c.dnsAnswers.push(f)
 			}
 		}
 	}

@@ -14,12 +14,13 @@ import (
 // describes.
 type eventKind uint8
 
-// Event kinds. The four capture-only streams Snapshot carries.
+// Event kinds. The five capture-only streams Snapshot carries.
 const (
 	eventSYN eventKind = iota
 	eventRST
 	eventDNSQuery
 	eventDNSError
+	eventDNSAnswer
 )
 
 // String names the event kind for the TYPE column.
@@ -31,15 +32,18 @@ func (k eventKind) String() string {
 		return "DNS Q"
 	case eventDNSError:
 		return "DNS ERR"
+	case eventDNSAnswer:
+		return "DNS A"
 	default:
 		return "SYN"
 	}
 }
 
 // eventRecord is one row in the events panel, formatted for display rather
-// than carrying the raw capture/dpi types: the four source streams
+// than carrying the raw capture/dpi types: the five source streams
 // (capture.SYNEvent, capture.RSTEvent, dpi.QueryFinding,
-// dpi.DNSErrorFinding) have no shared shape of their own.
+// dpi.DNSErrorFinding, dpi.DNSAnswerFinding) have no shared shape of their
+// own.
 type eventRecord struct {
 	At     time.Time
 	Kind   eventKind
@@ -80,13 +84,19 @@ func (r *eventRing) len() int {
 	return len(r.items)
 }
 
-// appendEvents converts snap's four capture-only event streams into
+// appendEvents converts snap's five capture-only event streams into
 // eventRecords, merges them into one time-sorted list (capture drains each
-// stream independently, so they arrive in four separately-ordered slices),
+// stream independently, so they arrive in five separately-ordered slices),
 // and pushes them onto the model's own history — the one place they survive,
-// since Snapshot itself drops them on the very next Refresh.
+// since Snapshot itself drops them on the very next Refresh. If the events
+// cursor was sitting on the most-recently-received record beforehand, it is
+// carried forward onto whatever record ends up most recent afterwards, so
+// the panel auto-scrolls along with a viewer who hasn't scrolled away from
+// the live edge.
 func (m *Model) appendEvents(snap aggregate.Snapshot) {
-	recs := make([]eventRecord, 0, len(snap.SYNEvents)+len(snap.RSTEvents)+len(snap.DNSQueries)+len(snap.DNSErrors))
+	followLatest := m.events.len() == 0 || m.eventsCursor == m.events.len()-1
+
+	recs := make([]eventRecord, 0, len(snap.SYNEvents)+len(snap.RSTEvents)+len(snap.DNSQueries)+len(snap.DNSErrors)+len(snap.DNSAnswers))
 
 	for _, e := range snap.SYNEvents {
 		recs = append(recs, eventRecord{
@@ -123,12 +133,25 @@ func (m *Model) appendEvents(snap aggregate.Snapshot) {
 			Info:   e.Name + " (" + e.QType + ") " + e.RCode,
 		})
 	}
+	for _, a := range snap.DNSAnswers {
+		recs = append(recs, eventRecord{
+			At:     a.At,
+			Kind:   eventDNSAnswer,
+			Remote: a.ServerAddr,
+			Info:   a.Name + " (" + a.QType + ") -> " + a.Answer,
+		})
+	}
 
 	sort.SliceStable(recs, func(i, j int) bool { return recs[i].At.Before(recs[j].At) })
 
 	for _, rec := range recs {
 		m.events.push(rec)
 	}
+
+	if followLatest && m.events.len() > 0 {
+		m.eventsCursor = m.events.len() - 1
+	}
+	m.eventsWindowTop = eventsWindowStart(m.eventsWindowTop, m.eventsCursor, m.events.len(), m.eventsRowLines())
 }
 
 // formatEventRow renders one eventRecord's TIME, TYPE, LOCAL, REMOTE and
@@ -195,10 +218,46 @@ func renderEventRow(rec eventRecord, infoWidth int) string {
 // SYN/RST/DNS activity has been seen.
 const emptyEventsMessage = "  (no events yet)"
 
+// eventsWindowStart computes the events panel's own scroll-window start,
+// scrolling by only as much as necessary to bring cursor back into a
+// limit-row window beginning at prevStart — unlike visibleWindow, which
+// re-anchors the cursor to whichever edge it crosses every time it is
+// called, this lets the cursor move freely within an already-visible window,
+// and lets appendEvents follow newly-arrived rows down without disturbing a
+// window the user is deliberately holding in place. prevStart need not
+// already be valid for n/limit — e.g. after a resize shrinks limit — since
+// the two clamps below always bring it back into range first.
+func eventsWindowStart(prevStart, cursor, n, limit int) int {
+	if limit <= 0 || n <= limit {
+		return 0
+	}
+
+	start := clamp(prevStart, 0, n-limit)
+	if cursor < start {
+		start = cursor
+	}
+	if cursor > start+limit-1 {
+		start = cursor - limit + 1
+	}
+	return clamp(start, 0, n-limit)
+}
+
+// eventsVisibleWindow is eventsWindowStart's counterpart for rendering: it
+// derives the same start (without persisting it — Model's View methods take
+// a value receiver) plus the matching end index.
+func eventsVisibleWindow(top, cursor, n, limit int) (start, end int) {
+	if limit <= 0 || n <= limit {
+		return 0, n
+	}
+	start = eventsWindowStart(top, cursor, n, limit)
+	return start, start + limit
+}
+
 // viewEvents renders the events panel's column header and as many rows as
-// fit, keeping eventsCursor on screen and highlighting the selected row only
-// while the events panel itself has focus — an unfocused panel's cursor
-// should not visually compete with the focused panel's own selection.
+// fit, keeping eventsCursor on screen. The selected row is always
+// highlighted, focus or not — matching the connections table, whose own
+// cursor highlight isn't gated on focus either — so the panel's auto-scroll
+// stays visible without the user needing to tab over to it first.
 func (m Model) viewEvents() []string {
 	infoWidth := eventInfoWidth(m.contentWidth())
 	lines := []string{m.styles.ColumnHeader.Render(renderEventHeader(infoWidth))}
@@ -209,10 +268,10 @@ func (m Model) viewEvents() []string {
 		return m.fitEvents(lines)
 	}
 
-	start, end := visibleWindow(len(items), m.eventsCursor, m.eventsRowLines())
+	start, end := eventsVisibleWindow(m.eventsWindowTop, m.eventsCursor, len(items), m.eventsRowLines())
 	for i, rec := range items[start:end] {
 		line := renderEventRow(rec, infoWidth)
-		if start+i == m.eventsCursor && m.focus == focusEvents {
+		if start+i == m.eventsCursor {
 			line = m.styles.Selected.Render(line)
 		}
 		lines = append(lines, line)

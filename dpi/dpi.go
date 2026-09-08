@@ -149,6 +149,35 @@ type DNSErrorFinding struct {
 	At         time.Time
 }
 
+// DNSAnswerFinding is one successful DNS answer record (A or AAAA) observed
+// in a response — unlike HostnameFinding, it names one event in flight
+// (with its own timestamp and server) rather than a standing IP-to-hostname
+// mapping, and is never written into HostnameCache.
+type DNSAnswerFinding struct {
+	Name       string
+	QType      string
+	Answer     string
+	ServerAddr string
+	At         time.Time
+}
+
+// AnswerPassiveInspector is implemented by a PassiveInspector that also
+// reports the successful DNS answers it sees, in addition to whatever it
+// reports through Inspect. It is a separate interface rather than a wider
+// PassiveInspector.Inspect return type for the same reason
+// QueryPassiveInspector is: InspectAnswer needs the packet's server address
+// and timestamp, which Inspect's payload-only signature does not carry, and
+// most PassiveInspectors have no answers to report at all.
+type AnswerPassiveInspector interface {
+	PassiveInspector
+
+	// InspectAnswer examines payload — the same complete DNS message
+	// Inspect would receive — and returns one DNSAnswerFinding per
+	// successful A/AAAA answer record, if payload is a response with no
+	// error.
+	InspectAnswer(payload []byte, serverAddr string, at time.Time) []DNSAnswerFinding
+}
+
 // ErrorPassiveInspector is implemented by a PassiveInspector that also
 // reports the DNS error responses it sees, in addition to whatever it
 // reports through Inspect. It is a separate interface rather than a wider
