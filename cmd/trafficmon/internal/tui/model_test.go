@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -700,7 +701,9 @@ func TestUpdateWindowSize(t *testing.T) {
 }
 
 func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
-	for _, binding := range allBindings(t, DefaultKeyMap()) {
+	keys := DefaultKeyMap()
+
+	for _, binding := range allBindings(t, keys) {
 		for _, k := range binding.Keys() {
 			t.Run(k, func(t *testing.T) {
 				// A filter already in force gives `/` something to open over.
@@ -708,6 +711,12 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 				m.filter = "1"
 				m.rebuild()
 				m.cursor = 1
+
+				// Unzoom (esc) only has an effect while a panel is zoomed;
+				// every other binding is exercised from the same baseline.
+				if binding.Help().Key == keys.Unzoom.Help().Key {
+					m.zoomed = true
+				}
 
 				before := modelState(m, nil)
 				next, cmd := press(t, m, k)
@@ -724,9 +733,10 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 // modelState is everything a keypress can observably change, rendered so that
 // a test can tell "the model reacted" from "the model did not".
 func modelState(m Model, cmd tea.Cmd) string {
-	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t showIfacePicker=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t showIPv4=%t showIPv6=%t showPrivate=%t quit=%t",
+	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t showIfacePicker=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t showIPv4=%t showIPv6=%t showPrivate=%t focus=%d zoomed=%t eventsCursor=%d quit=%t",
 		m.grouping, m.sort, m.cursor,
-		rowLabels(m), m.paused, m.showHelp, m.showIfacePicker, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, m.showIPv4, m.showIPv6, m.showPrivate, cmd != nil)
+		rowLabels(m), m.paused, m.showHelp, m.showIfacePicker, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, m.showIPv4, m.showIPv6, m.showPrivate,
+		m.focus, m.zoomed, m.eventsCursor, cmd != nil)
 }
 
 // rowLabels is the labels of the rows on screen, in order.
@@ -1370,8 +1380,13 @@ func TestFilterIsVisibleWhileItIsInForce(t *testing.T) {
 	// live/paused flag, and at 100 columns those alone leave no room for the
 	// filter status this test is actually about — see
 	// TestFilterHeaderTruncatesALongFilter, which widens for the same reason.
+	//
+	// Heightened past newLiveModel's default 12 rows: the events panel now
+	// shares the terminal with Connections, and 12 rows leaves no room for
+	// the footer this test is actually about once both panels' minimums are
+	// accounted for.
 	m := newLiveModel()
-	m.width = 150
+	m.width, m.height = 150, 20
 	m = pressAll(t, m, "/", "s", "s", "h")
 
 	// While typing, the footer is the input: the key hints it displaces are
@@ -1465,5 +1480,170 @@ func TestEmptyTableSaysWhyItIsEmpty(t *testing.T) {
 				t.Errorf("empty table does not say %q:\n%s", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestFocusNextTogglesBetweenPanels(t *testing.T) {
+	m := newLiveModel()
+	if m.focus != focusConnections {
+		t.Fatalf("the model should start focused on connections")
+	}
+
+	m, _ = press(t, m, "tab")
+	if m.focus != focusEvents {
+		t.Errorf("tab did not move focus to the events panel")
+	}
+
+	m, _ = press(t, m, "tab")
+	if m.focus != focusConnections {
+		t.Errorf("tab did not move focus back to connections")
+	}
+}
+
+func TestFocusNextNoOpWhileZoomed(t *testing.T) {
+	m := newLiveModel()
+	m.zoomed = true
+
+	m, _ = press(t, m, "tab")
+	if m.focus != focusConnections {
+		t.Errorf("tab changed focus while zoomed, want it to stay a no-op")
+	}
+}
+
+func TestZoomHidesOtherPanelAndEscRestores(t *testing.T) {
+	m := newLiveModel()
+	m.width, m.height = 100, 30
+
+	m, _ = press(t, m, "enter")
+	if !m.zoomed {
+		t.Fatalf("enter did not zoom the focused panel")
+	}
+
+	connRows, eventsRows := m.layout()
+	if connRows <= 0 || eventsRows != 0 {
+		t.Errorf("layout() = (%d, %d), want the events panel hidden while zoomed to connections", connRows, eventsRows)
+	}
+	if !strings.Contains(m.View(), panelTitle) {
+		t.Errorf("the zoomed panel's own border should still be drawn:\n%s", m.View())
+	}
+	if strings.Contains(m.View(), eventsPanelTitle) {
+		t.Errorf("the unzoomed panel should not render at all:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "esc")
+	if m.zoomed {
+		t.Errorf("esc did not unzoom")
+	}
+	connRows, eventsRows = m.layout()
+	if connRows <= 0 || eventsRows <= 0 {
+		t.Errorf("layout() = (%d, %d), want both panels visible again", connRows, eventsRows)
+	}
+}
+
+func TestEventsPanelDefaultsToQuarterHeight(t *testing.T) {
+	m := newLiveModel()
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 41})
+	m = next.(Model)
+
+	// The two-panel area is height-1 (the footer), 40 lines. A quarter of
+	// that is 10 total lines for events; minus its own 3-line chrome, 7 data
+	// rows. Connections gets the 30 lines left over, minus its own 4-line
+	// chrome: 26 data rows.
+	connRows, eventsRows := m.layout()
+	if eventsRows != 7 {
+		t.Errorf("eventsRows = %d, want 7", eventsRows)
+	}
+	if connRows != 26 {
+		t.Errorf("connRows = %d, want 26", connRows)
+	}
+}
+
+func TestMovementKeysTargetFocusedPanel(t *testing.T) {
+	m := newLiveModel()
+	m.width, m.height = 100, 41
+	for i := range 5 {
+		m.events.push(eventRecord{At: testNow, Kind: eventSYN, Info: strconv.Itoa(i)})
+	}
+	m.cursor = 1
+	m.eventsCursor = 1
+
+	m.focus = focusEvents
+	m, _ = press(t, m, "down")
+	if m.eventsCursor != 2 {
+		t.Errorf("eventsCursor = %d, want 2", m.eventsCursor)
+	}
+	if m.cursor != 1 {
+		t.Errorf("connections cursor moved while the events panel had focus: %d", m.cursor)
+	}
+
+	m.focus = focusConnections
+	m, _ = press(t, m, "down")
+	if m.cursor != 2 {
+		t.Errorf("cursor = %d, want 2", m.cursor)
+	}
+	if m.eventsCursor != 2 {
+		t.Errorf("eventsCursor moved while the connections panel had focus: %d", m.eventsCursor)
+	}
+}
+
+func TestMouseDragResizesEventsPanel(t *testing.T) {
+	m := newLiveModel()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 41})
+	m = next.(Model)
+
+	before := m.eventsPanelRows
+	row := m.dividerRow()
+
+	next, _ = m.Update(tea.MouseMsg{Y: row, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if !m.draggingDivider {
+		t.Fatalf("pressing on the divider did not start a drag")
+	}
+
+	// Dragging the divider up by 2 rows grows the events panel by 2.
+	next, _ = m.Update(tea.MouseMsg{Y: row - 2, Action: tea.MouseActionMotion})
+	m = next.(Model)
+	if m.eventsPanelRows != before+2 {
+		t.Errorf("eventsPanelRows = %d, want %d", m.eventsPanelRows, before+2)
+	}
+
+	next, _ = m.Update(tea.MouseMsg{Y: row - 2, Action: tea.MouseActionRelease})
+	m = next.(Model)
+	if m.draggingDivider {
+		t.Errorf("release did not end the drag")
+	}
+
+	// Dragging far past the minimum clamps rather than shrinking connections
+	// away entirely. The divider itself has moved since the earlier drag
+	// grew the events panel, so it has to be recomputed rather than reusing
+	// the first press's row.
+	row = m.dividerRow()
+	next, _ = m.Update(tea.MouseMsg{Y: row, Action: tea.MouseActionPress})
+	m = next.(Model)
+	next, _ = m.Update(tea.MouseMsg{Y: row + 100, Action: tea.MouseActionMotion})
+	m = next.(Model)
+	if m.eventsPanelRows != minPanelDataRows {
+		t.Errorf("eventsPanelRows = %d, want the clamped minimum %d", m.eventsPanelRows, minPanelDataRows)
+	}
+}
+
+func TestMouseIgnoredWhileZoomed(t *testing.T) {
+	m := newLiveModel()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 41})
+	m = next.(Model)
+	m.zoomed = true
+
+	before := m.eventsPanelRows
+	next, _ = m.Update(tea.MouseMsg{Y: 5, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if m.draggingDivider {
+		t.Errorf("a press while zoomed should not start a divider drag")
+	}
+
+	next, _ = m.Update(tea.MouseMsg{Y: 0, Action: tea.MouseActionMotion})
+	m = next.(Model)
+	if m.eventsPanelRows != before {
+		t.Errorf("eventsPanelRows changed while zoomed, want it untouched")
 	}
 }

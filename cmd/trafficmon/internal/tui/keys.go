@@ -26,9 +26,16 @@ type KeyMap struct {
 	ToggleIPv6      key.Binding
 	TogglePrivate   key.Binding
 	Interfaces      key.Binding
-	Pause           key.Binding
-	Help            key.Binding
-	Quit            key.Binding
+	// FocusNext cycles which of the Connections/Events panels the keyboard
+	// acts on. Zoom gives the focused panel the full height (border kept),
+	// and Unzoom restores the split — the only way out while zoomed, since
+	// FocusNext is a no-op in that state.
+	FocusNext key.Binding
+	Zoom      key.Binding
+	Unzoom    key.Binding
+	Pause     key.Binding
+	Help      key.Binding
+	Quit      key.Binding
 }
 
 // DefaultKeyMap returns the standard bindings.
@@ -51,6 +58,9 @@ func DefaultKeyMap() KeyMap {
 		ToggleIPv6:      key.NewBinding(key.WithKeys("6"), key.WithHelp("6", "toggle ipv6")),
 		TogglePrivate:   key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "toggle private")),
 		Interfaces:      key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "toggle interfaces")),
+		FocusNext:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch panel")),
+		Zoom:            key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "zoom panel")),
+		Unzoom:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "unzoom")),
 		Pause:           key.NewBinding(key.WithKeys("p", " "), key.WithHelp("p/space", "pause")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
@@ -73,6 +83,6 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
 		{k.Filter, k.ToggleListening, k.ToggleTCP, k.ToggleUDP, k.ToggleIPv4, k.ToggleIPv6, k.TogglePrivate, k.Interfaces},
-		{k.Grouping, k.Sort, k.RateSort, k.Pause, k.Help, k.Quit},
+		{k.Grouping, k.Sort, k.RateSort, k.FocusNext, k.Zoom, k.Unzoom, k.Pause, k.Help, k.Quit},
 	}
 }

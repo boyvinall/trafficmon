@@ -25,14 +25,32 @@ const TickInterval = time.Second
 // appName is the title shown at the left of the header bar.
 const appName = "trafficmon"
 
-// chromeLines is how many lines View spends on furniture rather than data:
-// the panel's top and bottom border, the header line inside it, the column
-// titles, and the footer below the panel.
-const chromeLines = 5
+// connChromeLines and eventsChromeLines are how many lines View spends on
+// furniture rather than data in each panel: the panel's top and bottom
+// border, its column-title line, and — for Connections only — the header
+// line above it (Events has no breadcrumb header of its own). The footer
+// below both panels is accounted for separately, once per View, since it is
+// shared rather than belonging to either panel.
+const (
+	connChromeLines   = 4
+	eventsChromeLines = 3
+)
 
-// panelTitle is the connections panel's border-inlaid title — the first of
-// what will grow into several bordered panels sharing renderPanel's look.
-const panelTitle = "Connections"
+// panelTitle and eventsPanelTitle are the two panels' border-inlaid titles.
+const (
+	panelTitle       = "Connections"
+	eventsPanelTitle = "Events"
+)
+
+// eventsHeightFraction is the default share of the two-panel area the events
+// panel takes on the first WindowSizeMsg: one part in four, connections
+// taking the rest.
+const eventsHeightFraction = 4
+
+// minPanelDataRows is the fewest data rows either panel is ever left with,
+// whether from the default split or from dragging the divider: enough that a
+// panel squeezed all the way down still shows something.
+const minPanelDataRows = 3
 
 // defaultPageSize is how far PgUp/PgDn move the cursor before the terminal
 // height is known and a real screenful can be measured.
@@ -64,6 +82,16 @@ const filterHint = "enter apply · empty clears · esc cancel"
 const maxFilterLabel = 16
 
 type tickMsg time.Time
+
+// panelFocus is which of the two panels — Connections or Events — currently
+// has the keyboard, cycled with FocusNext (tab). focusConnections is the
+// zero value, which is what NewModel starts with.
+type panelFocus uint8
+
+const (
+	focusConnections panelFocus = iota
+	focusEvents
+)
 
 // Model is the root Bubble Tea model.
 //
@@ -170,6 +198,37 @@ type Model struct {
 	// showListening does, and is a no-op on a row whose remote address does
 	// not parse.
 	showPrivate bool
+
+	// events is the events panel's own bounded history, appended to at the
+	// end of every refresh — see appendEvents. Snapshot itself drops its four
+	// event streams on the very next Refresh, so this ring is the only place
+	// they are retained across ticks.
+	events eventRing
+	// eventsCursor is the events panel's own scroll position, independent of
+	// the connections table's cursor: the two panels are scrolled separately
+	// even though only one of them has focus at a time.
+	eventsCursor int
+	// focus says which panel movement keys act on. zoomed gives that panel
+	// the full height (border kept) and hides the other entirely; Esc
+	// (Unzoom) is the only way back out, since FocusNext is a no-op while
+	// zoomed.
+	focus  panelFocus
+	zoomed bool
+	// eventsPanelRows is the events panel's own height in data rows (not
+	// counting its border/column-header chrome) while not zoomed. It starts
+	// at zero and is seeded to the eventsHeightFraction default by the first
+	// WindowSizeMsg (see resizePanels), then adjusted by dragging the
+	// divider. A later resize re-derives it from the *fraction* of the
+	// two-panel area it occupied rather than carrying over an absolute row
+	// count, so a terminal resize does not leave the split's proportions
+	// stale.
+	eventsPanelRows int
+	// draggingDivider and dragRow track an in-progress click-drag on the
+	// divider between the two panels; dragRow is the terminal row the drag
+	// last moved through, so each motion event only has to apply its own
+	// delta.
+	draggingDivider bool
+	dragRow         int
 
 	width, height int
 }
@@ -278,7 +337,10 @@ func tick() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+		m.resizePanels(msg.Width, msg.Height)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tickMsg:
 		// A paused model freezes its clock along with its rows: `now` is what
@@ -333,22 +395,37 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleIfacePickerKey(msg)
 	}
 
+	// Esc only means anything while a panel is zoomed — everything else
+	// below applies to whichever panel has focus regardless of zoom, since
+	// zoom only changes layout, not input routing.
+	if m.zoomed && key.Matches(msg, m.keys.Unzoom) {
+		m.zoomed = false
+		return m, nil
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
 
 	case key.Matches(msg, m.keys.Up):
-		m.moveCursor(-1)
+		m.moveSelection(-1)
 	case key.Matches(msg, m.keys.Down):
-		m.moveCursor(1)
+		m.moveSelection(1)
 	case key.Matches(msg, m.keys.PageUp):
-		m.moveCursor(-m.pageSize())
+		m.moveSelection(-m.pageSize())
 	case key.Matches(msg, m.keys.PageDown):
-		m.moveCursor(m.pageSize())
+		m.moveSelection(m.pageSize())
 	case key.Matches(msg, m.keys.Home):
-		m.moveCursor(-len(m.rows))
+		m.moveSelection(-m.selectionLen())
 	case key.Matches(msg, m.keys.End):
-		m.moveCursor(len(m.rows))
+		m.moveSelection(m.selectionLen())
+
+	case key.Matches(msg, m.keys.FocusNext):
+		if !m.zoomed {
+			m.toggleFocus()
+		}
+	case key.Matches(msg, m.keys.Zoom):
+		m.zoomed = true
 
 	case key.Matches(msg, m.keys.Grouping):
 		m.cycleGrouping()
@@ -499,6 +576,46 @@ func (m *Model) moveCursor(delta int) {
 	m.cursor = clamp(m.cursor+delta, 0, len(m.rows)-1)
 }
 
+// moveSelection moves whichever panel currently has focus's own cursor by
+// delta: the connections table's cursor, or the events panel's eventsCursor.
+// Zoom does not affect this routing — only which panels are drawn.
+func (m *Model) moveSelection(delta int) {
+	if m.focus == focusEvents {
+		m.moveEventsCursor(delta)
+		return
+	}
+	m.moveCursor(delta)
+}
+
+// moveEventsCursor moves the events panel's own cursor by delta, clamping at
+// both ends the same way moveCursor does for the connections table.
+func (m *Model) moveEventsCursor(delta int) {
+	n := m.events.len()
+	if n == 0 {
+		m.eventsCursor = 0
+		return
+	}
+	m.eventsCursor = clamp(m.eventsCursor+delta, 0, n-1)
+}
+
+// selectionLen is how many rows the focused panel's cursor moves against —
+// what Home/End clamp to.
+func (m Model) selectionLen() int {
+	if m.focus == focusEvents {
+		return m.events.len()
+	}
+	return len(m.rows)
+}
+
+// toggleFocus swaps which of the two panels the keyboard acts on.
+func (m *Model) toggleFocus() {
+	if m.focus == focusConnections {
+		m.focus = focusEvents
+	} else {
+		m.focus = focusConnections
+	}
+}
+
 // moveIfaceCursor moves the interface picker's highlighted row by delta,
 // clamping at both ends the same way moveCursor does for the table.
 func (m *Model) moveIfaceCursor(delta int) {
@@ -521,15 +638,137 @@ func (m *Model) toggleActiveInterface() {
 	m.rebuild()
 }
 
-// pageSize is how far PgUp/PgDn move the cursor: one screenful, so that paging
-// lines up with what the user can actually see. Until the first
-// tea.WindowSizeMsg arrives there is no screenful to measure, so it falls back
-// to a fixed jump.
+// pageSize is how far PgUp/PgDn move the focused panel's cursor: one
+// screenful of whichever panel that is, so that paging lines up with what
+// the user can actually see. Until the first tea.WindowSizeMsg arrives there
+// is no screenful to measure, so it falls back to a fixed jump.
 func (m Model) pageSize() int {
-	if n := m.rowLines(); n > 0 {
+	connRows, eventsRows := m.layout()
+	n := connRows
+	if m.focus == focusEvents {
+		n = eventsRows
+	}
+	if n > 0 {
 		return n
 	}
 	return defaultPageSize
+}
+
+// layout computes the data-row budget for the connections and events
+// panels, given the terminal height, the zoom/focus state, and
+// eventsPanelRows. It is the one place that arithmetic is spelled out, so
+// that View's rendering and the mouse divider hit-test can never disagree.
+//
+// The footer always takes exactly one line, even while a panel is zoomed.
+// While zoomed, the focused panel gets everything else and the other panel
+// is not rendered at all (0 rows, no border drawn). Otherwise the events
+// panel gets eventsPanelRows data rows (floored at minPanelDataRows) and
+// connections gets whatever remains, floored the same way — trading away
+// some of the events panel's rows first, since it is the one the user (or
+// the default fraction) sized last.
+func (m Model) layout() (connRows, eventsRows int) {
+	if m.height <= 0 {
+		return 0, 0
+	}
+
+	if m.zoomed {
+		avail := m.splitTotalLines()
+		if m.focus == focusEvents {
+			return 0, max(avail-eventsChromeLines, 1)
+		}
+		return max(avail-connChromeLines, 1), 0
+	}
+
+	total := m.splitTotalLines()
+	eventsRows = max(m.eventsPanelRows, minPanelDataRows)
+	connRows = total - connChromeLines - (eventsRows + eventsChromeLines)
+	if connRows < minPanelDataRows {
+		connRows = minPanelDataRows
+		eventsRows = max(total-connChromeLines-minPanelDataRows-eventsChromeLines, minPanelDataRows)
+	}
+	return connRows, eventsRows
+}
+
+// splitTotalLines is the total lines available to both panels' chrome and
+// data combined: the terminal height minus the one line the footer always
+// takes.
+func (m Model) splitTotalLines() int {
+	return max(m.height-1, 0)
+}
+
+// eventsRowLines is how many data rows the events panel currently has room
+// for, per layout.
+func (m Model) eventsRowLines() int {
+	_, eventsRows := m.layout()
+	return eventsRows
+}
+
+// resizePanels applies a new terminal size. eventsPanelRows is re-derived
+// from the *fraction* of the two-panel area it occupied before the resize,
+// rather than carried over as an absolute row count, so that a terminal
+// resize does not leave the split's proportions stale; the very first resize
+// has no prior fraction to preserve, so it seeds the eventsHeightFraction
+// default instead.
+func (m *Model) resizePanels(width, height int) {
+	frac := 1.0 / float64(eventsHeightFraction)
+	if m.eventsPanelRows > 0 {
+		if prevTotal := m.splitTotalLines(); prevTotal > 0 {
+			frac = float64(m.eventsPanelRows+eventsChromeLines) / float64(prevTotal)
+		}
+	}
+
+	m.width, m.height = width, height
+
+	total := m.splitTotalLines()
+	m.eventsPanelRows = max(int(float64(total)*frac)-eventsChromeLines, minPanelDataRows)
+}
+
+// dividerRow is the terminal row of the line between the two panels — the
+// connections panel's own bottom border — that a mouse press has to land on
+// to start a divider drag. It returns -1 while zoomed, since there is no
+// divider to grab: only one panel is ever on screen.
+func (m Model) dividerRow() int {
+	if m.zoomed {
+		return -1
+	}
+	connRows, _ := m.layout()
+	return connChromeLines + connRows - 1
+}
+
+// adjustEventsPanelRows grows or shrinks the events panel by delta data
+// rows, clamped so neither panel can shrink below minPanelDataRows.
+func (m *Model) adjustEventsPanelRows(delta int) {
+	total := m.splitTotalLines()
+	maxRows := max(total-connChromeLines-eventsChromeLines-minPanelDataRows, minPanelDataRows)
+	m.eventsPanelRows = clamp(m.eventsPanelRows+delta, minPanelDataRows, maxRows)
+}
+
+// handleMouse applies one mouse event: pressing on the divider between the
+// two panels starts a drag, motion while dragging resizes the events panel,
+// and release ends it. Mouse input is ignored entirely while zoomed, since
+// the divider it drags does not exist then.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.zoomed {
+		return m, nil
+	}
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if msg.Y == m.dividerRow() {
+			m.draggingDivider = true
+			m.dragRow = msg.Y
+		}
+	case tea.MouseActionMotion:
+		if m.draggingDivider {
+			delta := msg.Y - m.dragRow
+			m.dragRow = msg.Y
+			// Dragging the divider up (delta < 0) grows the events panel.
+			m.adjustEventsPanelRows(-delta)
+		}
+	case tea.MouseActionRelease:
+		m.draggingDivider = false
+	}
+	return m, nil
 }
 
 // cycleGrouping advances the grouping to the next of the three states —
@@ -599,7 +838,13 @@ func (m *Model) refresh(now time.Time) {
 		return
 	}
 
-	m.snap = m.agg.Refresh(now)
+	snap := m.agg.Refresh(now)
+	// Copied out before m.snap is overwritten: Refresh drains these four
+	// streams fresh every call and does not retain them (see Snapshot's own
+	// doc comment), so this is the only chance to keep anything that
+	// accumulated since the previous tick.
+	m.appendEvents(snap)
+	m.snap = snap
 	m.now = now
 	m.rebuild()
 }
@@ -681,21 +926,21 @@ func clamp(v, lo, hi int) int {
 }
 
 // View renders the header bar and the table (or the help overlay in its
-// place) inside a bordered panel, with the footer below it, as one frame no
-// taller than the terminal.
+// place) inside the Connections panel, the events feed inside the Events
+// panel below it, and the footer below both, as one frame no taller than the
+// terminal. While zoomed only the focused panel's own bordered box is drawn,
+// per layout.
 func (m Model) View() string {
-	body := []string{m.viewHeader()}
-	switch {
-	case m.showHelp:
-		body = append(body, m.viewHelp()...)
-	case m.showIfacePicker:
-		body = append(body, m.viewIfacePicker()...)
-	default:
-		body = append(body, m.viewTable()...)
-	}
+	connRows, eventsRows := m.layout()
 
-	panel := renderPanel(m.styles, panelTitle, m.viewWidth(), len(body)+panelBorderHeight, strings.Join(body, "\n"))
-	lines := append(strings.Split(panel, "\n"), m.viewFooter())
+	var lines []string
+	if connRows > 0 {
+		lines = append(lines, m.viewConnPanel()...)
+	}
+	if eventsRows > 0 {
+		lines = append(lines, m.viewEventsPanel()...)
+	}
+	lines = append(lines, m.viewFooter())
 
 	// Nothing may be wider than the terminal, and the pieces cannot all
 	// guarantee that themselves: the column layout has a floor it refuses to
@@ -720,6 +965,34 @@ func (m Model) View() string {
 		lines = lines[:m.height]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// viewConnPanel renders the Connections panel: the header bar and the table
+// (or the help overlay/interface picker in its place), inside a bordered box
+// sized from rowLines/layout.
+func (m Model) viewConnPanel() []string {
+	body := []string{m.viewHeader()}
+	switch {
+	case m.showHelp:
+		body = append(body, m.viewHelp()...)
+	case m.showIfacePicker:
+		body = append(body, m.viewIfacePicker()...)
+	default:
+		body = append(body, m.viewTable()...)
+	}
+
+	focused := m.zoomed || m.focus == focusConnections
+	panel := renderPanel(m.styles, panelTitle, m.viewWidth(), len(body)+panelBorderHeight, strings.Join(body, "\n"), focused)
+	return strings.Split(panel, "\n")
+}
+
+// viewEventsPanel renders the Events panel: the SYN/RST/DNS-query/DNS-error
+// feed, inside a bordered box the same way viewConnPanel builds its own.
+func (m Model) viewEventsPanel() []string {
+	body := m.viewEvents()
+	focused := m.zoomed || m.focus == focusEvents
+	panel := renderPanel(m.styles, eventsPanelTitle, m.viewWidth(), len(body)+panelBorderHeight, strings.Join(body, "\n"), focused)
+	return strings.Split(panel, "\n")
 }
 
 // viewHeader renders the title bar: the current grouping on the left, the
@@ -909,12 +1182,17 @@ func (m Model) footerKeys() []key.Binding {
 // for, which is what pins the footer to the bottom of the terminal. A window
 // whose size is not known yet gets the body unchanged.
 func (m Model) fit(lines []string) []string {
-	n := m.rowLines()
+	return fitLines(lines, m.rowLines())
+}
+
+// fitLines is fit's underlying arithmetic, shared with fitEvents: n counts
+// data rows, the column-title line sits above them, and n<=0 means the frame
+// size is not known yet, so lines are returned unchanged.
+func fitLines(lines []string, n int) []string {
 	if n <= 0 {
 		return lines
 	}
 
-	// rowLines counts data rows; the column-title line sits above them.
 	n++
 	for len(lines) < n {
 		lines = append(lines, "")
@@ -922,13 +1200,12 @@ func (m Model) fit(lines []string) []string {
 	return lines[:n]
 }
 
-// rowLines is how many table rows the terminal has room for, or 0 when its
-// height is not known yet and every row is drawn.
+// rowLines is how many connections-table rows the terminal has room for, per
+// layout, or 0 when the terminal size is not known yet and every row is
+// drawn.
 func (m Model) rowLines() int {
-	if m.height <= 0 {
-		return 0
-	}
-	return max(m.height-chromeLines, 1)
+	connRows, _ := m.layout()
+	return connRows
 }
 
 // viewWidth is the terminal width, falling back to a sensible default until

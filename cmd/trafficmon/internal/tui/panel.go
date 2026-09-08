@@ -27,8 +27,10 @@ var panelBorderStyle = lipgloss.RoundedBorder()
 // renderPanel draws body inside a rounded, colored border sized to exactly
 // outerWidth columns and outerHeight rows. If title is non-empty, it is
 // inlaid in the top border (see renderPanelTitleBar) instead of taking up a
-// line of the panel's own content.
-func renderPanel(styles Styles, title string, outerWidth, outerHeight int, body string) string {
+// line of the panel's own content. focused selects the theme's focused or
+// blurred border/title colors, so the panel that currently has the keyboard
+// reads as visually distinct from the one that does not.
+func renderPanel(styles Styles, title string, outerWidth, outerHeight int, body string, focused bool) string {
 	// lipgloss's Width/Height already include padding in their budget — only
 	// the border is subtracted here, not border+padding (that full
 	// panelBorderWidth/Height is what a panel's content has to subtract,
@@ -37,22 +39,34 @@ func renderPanel(styles Styles, title string, outerWidth, outerHeight int, body 
 	styleWidth := clamp(outerWidth-borderWidth, 1, outerWidth)
 	styleHeight := clamp(outerHeight-borderHeight, 1, outerHeight)
 
+	borderColor := colorBorder
+	if !focused {
+		borderColor = colorBorderBlurred
+	}
+
 	box := lipgloss.NewStyle().
 		Border(panelBorderStyle, false, true, true, true). // no top: the title bar replaces it
-		BorderForeground(colorBorder).
+		BorderForeground(borderColor).
 		Padding(0, 1).
 		Width(styleWidth).
 		Height(styleHeight).
 		Render(body)
 
-	return renderPanelTitleBar(styles, title, outerWidth) + "\n" + box
+	return renderPanelTitleBar(styles, title, outerWidth, focused) + "\n" + box
 }
 
 // renderPanelTitleBar draws a top border line of exactly outerWidth columns,
 // inlaying title (if any) after the left corner, e.g. "╭─ Title ────╮".
-func renderPanelTitleBar(styles Styles, title string, outerWidth int) string {
+func renderPanelTitleBar(styles Styles, title string, outerWidth int, focused bool) string {
 	corner, dash, endCorner := panelBorderStyle.TopLeft, panelBorderStyle.Top, panelBorderStyle.TopRight
-	border := lipgloss.NewStyle().Foreground(colorBorder)
+
+	borderColor := colorBorder
+	titleStyle := styles.PanelTitle
+	if !focused {
+		borderColor = colorBorderBlurred
+		titleStyle = styles.PanelTitleBlurred
+	}
+	border := lipgloss.NewStyle().Foreground(borderColor)
 
 	if title == "" {
 		return border.Render(corner + strings.Repeat(dash, max(outerWidth-2, 0)) + endCorner)
@@ -63,7 +77,7 @@ func renderPanelTitleBar(styles Styles, title string, outerWidth int) string {
 
 	var b strings.Builder
 	b.WriteString(border.Render(corner + dash))
-	b.WriteString(styles.PanelTitle.Render(label))
+	b.WriteString(titleStyle.Render(label))
 	b.WriteString(border.Render(strings.Repeat(dash, remaining) + endCorner))
 	return b.String()
 }

@@ -112,7 +112,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	g.Go(func() error { return source.Run(ctx) })
 	g.Go(func() error {
 		defer stop()
-		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), ifaces), tea.WithAltScreen(), tea.WithContext(ctx))
+		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), ifaces), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithMouseCellMotion())
 		_, err := p.Run()
 		return err
 	})
