@@ -209,6 +209,11 @@ type Row struct {
 	// has no such single answer once more than one connection is involved.
 	Hostname string
 
+	// Iface is the interface capture last saw this row's connection's
+	// traffic on, or "" once capture hasn't yet — the same first-seen
+	// representative-value trade LocalAddr and Hostname above make.
+	Iface string
+
 	BytesInTotal  uint64
 	BytesOutTotal uint64
 	RateInBps     float64
@@ -238,14 +243,15 @@ type Snapshot struct {
 	// build on.
 	At          time.Time
 	Connections []ConnectionRecord
-	// SYNEvents, RSTEvents, DNSQueries and DNSErrors are the capture-only
-	// event streams drained since the previous refresh — unlike Connections,
-	// these are not retained across ticks, so a consumer that skips a
-	// Refresh loses whatever accumulated in between.
+	// SYNEvents, RSTEvents, DNSQueries, DNSErrors and DNSAnswers are the
+	// capture-only event streams drained since the previous refresh — unlike
+	// Connections, these are not retained across ticks, so a consumer that
+	// skips a Refresh loses whatever accumulated in between.
 	SYNEvents  []capture.SYNEvent
 	RSTEvents  []capture.RSTEvent
 	DNSQueries []dpi.QueryFinding
 	DNSErrors  []dpi.DNSErrorFinding
+	DNSAnswers []dpi.DNSAnswerFinding
 	// PacketStats is each capture interface's most recently sampled pcap
 	// statistics, keyed by interface name — unlike the event streams above,
 	// this is a point-in-time snapshot, not drained.
@@ -286,6 +292,7 @@ func (a *Aggregator) Refresh(now time.Time) Snapshot {
 	snap.RSTEvents = a.cap.DrainRSTEvents()
 	snap.DNSQueries = a.cap.DrainDNSQueries()
 	snap.DNSErrors = a.cap.DrainDNSErrors()
+	snap.DNSAnswers = a.cap.DrainDNSAnswers()
 	snap.PacketStats = a.cap.PacketStats()
 
 	// Drop the counters behind whatever can no longer possibly be on

@@ -70,18 +70,17 @@ func (r *trafficmonReceiver) Start(_ context.Context, _ component.Host) error {
 		return nil
 	}
 
-	iface := r.cfg.Interface
-	if iface == "" {
-		var err error
-		if iface, err = capture.DefaultInterface(); err != nil { //nolint:contextcheck // DefaultInterface deliberately owns its own short, fixed timeout rather than ctx's
-			r.refs--
-			return fmt.Errorf("detect interface: %w", err)
-		}
+	spec := r.cfg.Interface
+	if spec == "" {
+		spec = capture.Any
+	}
+	if _, err := capture.ResolveInterfaces(spec); err != nil { //nolint:contextcheck // ResolveInterfaces deliberately owns its own short, fixed timeout(s), same as DefaultInterface did
+		r.refs--
+		return fmt.Errorf("resolve interfaces %q: %w", spec, err)
 	}
 
 	capCfg := capture.DefaultConfig()
-	capCfg.Interface = iface
-	capCfg.IncludeLoopback = r.cfg.IncludeLoopback
+	capCfg.Interface = spec
 	capCfg.EnableLogFeed = r.logsConsumer != nil
 
 	capturer := capture.New(capCfg)

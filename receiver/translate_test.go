@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 
 	"github.com/boyvinall/trafficmon/aggregate"
@@ -379,6 +380,12 @@ func TestBuildLogsDNSQuery(t *testing.T) {
 	if got, ok := lr.Attributes().Get("network.local.address"); !ok || got.Str() != "10.0.0.5" {
 		t.Errorf("network.local.address = %q, ok=%v, want 10.0.0.5", got.Str(), ok)
 	}
+	if lr.SeverityNumber() != plog.SeverityNumberInfo {
+		t.Errorf("severity = %v, want %v (a successful DNS query is routine, not an error)", lr.SeverityNumber(), plog.SeverityNumberInfo)
+	}
+	if lr.SeverityText() != "Info" {
+		t.Errorf("severity text = %q, want %q", lr.SeverityText(), "Info")
+	}
 }
 
 func TestBuildLogsDNSQueryUnattributed(t *testing.T) {
@@ -418,6 +425,9 @@ func TestBuildLogsSYN(t *testing.T) {
 	}
 	if got, _ := lr.Attributes().Get(metadata.AttrSYNAttemptCount); got.Int() != 1 {
 		t.Errorf("%s = %d, want 1 on first sighting", metadata.AttrSYNAttemptCount, got.Int())
+	}
+	if lr.SeverityNumber() != plog.SeverityNumberInfo {
+		t.Errorf("severity = %v, want %v (a SYN attempt alone is routine, not an error)", lr.SeverityNumber(), plog.SeverityNumberInfo)
 	}
 }
 

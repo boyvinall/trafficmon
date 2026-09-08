@@ -14,6 +14,84 @@ import (
 // misbehaving binary cannot stall startup forever.
 const routeTimeout = 3 * time.Second
 
+// Interface-spec keywords recognised in Config.Interface (and by
+// ResolveInterfaces directly), case-insensitively, alongside literal
+// device names in a comma-separated list — e.g. "eth0,loopback". An empty
+// spec is treated as Any.
+const (
+	// Any selects every interface libpcap can see. It is DefaultConfig's
+	// own default.
+	Any = "any"
+	// Default selects every interface currently backing a default route —
+	// there can be more than one, e.g. a different interface for the IPv4
+	// and IPv6 default routes.
+	Default = "default"
+	// Localhost selects the platform's loopback interface. "local" and
+	// "loopback" are accepted as synonyms in a spec string, but this is
+	// the one Go callers get a name for.
+	Localhost = "localhost"
+)
+
+// ResolveInterfaces expands an interface spec into the concrete,
+// deduplicated set of libpcap device names it names, in first-seen order.
+// Unknown keywords are never guessed at: anything that isn't Any, Default,
+// Localhost, or one of Localhost's "local"/"loopback" synonyms is taken as
+// a literal device name, unresolved and unvalidated until Run actually
+// tries to open it.
+func ResolveInterfaces(spec string) ([]string, error) {
+	if strings.TrimSpace(spec) == "" {
+		spec = Any
+	}
+
+	var (
+		out  []string
+		seen = make(map[string]struct{})
+	)
+	add := func(name string) {
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+
+	for _, tok := range strings.Split(spec, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+
+		switch strings.ToLower(tok) {
+		case Any:
+			names, err := ListInterfaces()
+			if err != nil {
+				return nil, err
+			}
+			for _, n := range names {
+				add(n)
+			}
+		case Default:
+			names, err := DefaultInterfaces()
+			if err != nil {
+				return nil, err
+			}
+			for _, n := range names {
+				add(n)
+			}
+		case Localhost, "local", "loopback":
+			name, err := loopbackDeviceName()
+			if err != nil {
+				return nil, err
+			}
+			add(name)
+		default:
+			add(tok)
+		}
+	}
+
+	return out, nil
+}
+
 // loopbackInterface is the name of the platform's loopback device, and
 // runRoute/parseRouteInterface find the interface backing the default route
 // by shelling out to the platform's own routing-table tool. All three are
@@ -27,18 +105,40 @@ const routeTimeout = 3 * time.Second
 // interface name and the loopback device has no stable name to compare
 // against.
 
-// DefaultInterface resolves the interface backing the default route, mirroring
-// what `route get default` reports — the same trick iftop uses to pick an
-// interface with no flags given.
-func DefaultInterface() (string, error) {
+// DefaultInterfaces resolves every interface currently backing a default
+// route: whichever carries the IPv4 default route, the IPv6 default
+// route, or both if they differ, mirroring what `route get default` /
+// `route get -inet6 default` report. Falls back to the first non-loopback
+// device libpcap offers if neither route lookup succeeds, same as
+// DefaultInterface always has.
+func DefaultInterfaces() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), routeTimeout)
 	defer cancel()
 
-	out, err := runRoute(ctx)
-	if err == nil {
-		if name, perr := parseRouteInterface(string(out)); perr == nil {
-			return name, nil
+	var (
+		out  []string
+		seen = make(map[string]struct{})
+	)
+	add := func(name string) {
+		if _, ok := seen[name]; ok {
+			return
 		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+
+	if out4, err := runRoute(ctx); err == nil {
+		if name, perr := parseRouteInterface(string(out4)); perr == nil {
+			add(name)
+		}
+	}
+	if out6, err := runRoute6(ctx); err == nil {
+		if name, perr := parseRouteInterface(string(out6)); perr == nil {
+			add(name)
+		}
+	}
+	if len(out) > 0 {
+		return out, nil
 	}
 
 	// No default route, or output we did not recognise: fall back to the
@@ -46,14 +146,24 @@ func DefaultInterface() (string, error) {
 	// a machine with a single uplink.
 	names, err := ListInterfaces()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	for _, n := range names {
 		if !isLoopbackInterface(n) {
-			return n, nil
+			return []string{n}, nil
 		}
 	}
-	return "", errors.New("no capturable interface found")
+	return nil, errors.New("no capturable interface found")
+}
+
+// DefaultInterface is DefaultInterfaces narrowed to one name, for callers
+// that only want a single best guess.
+func DefaultInterface() (string, error) {
+	names, err := DefaultInterfaces()
+	if err != nil {
+		return "", err
+	}
+	return names[0], nil
 }
 
 // localAddrSet collects the IP addresses configured on the named interfaces,
@@ -67,11 +177,11 @@ func localAddrSet(names []string) (map[netip.Addr]struct{}, error) {
 	for _, name := range names {
 		ifi, err := resolveInterface(name)
 		if err != nil {
-			return nil, fmt.Errorf("interface %s: %w", name, err)
+			continue
 		}
 		addrs, err := ifi.Addrs()
 		if err != nil {
-			return nil, fmt.Errorf("addresses of %s: %w", name, err)
+			continue
 		}
 		for _, a := range addrs {
 			ipnet, isIPNet := a.(*net.IPNet)

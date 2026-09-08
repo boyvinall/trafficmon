@@ -50,6 +50,33 @@ func (d *DNSAnswerInspector) Inspect(payload []byte) (findings []HostnameFinding
 	return findings
 }
 
+// InspectAnswer implements AnswerPassiveInspector. payload is one complete
+// DNS message, decoded independently of Inspect's own decode of the same
+// bytes — the same second-decode style QueryPassiveInspector already uses.
+func (d *DNSAnswerInspector) InspectAnswer(payload []byte, serverAddr string, at time.Time) (findings []DNSAnswerFinding) {
+	defer recoverPanic()
+
+	var msg layers.DNS
+	if err := msg.DecodeFromBytes(payload, gopacket.NilDecodeFeedback); err != nil || !msg.QR || msg.ResponseCode != layers.DNSResponseCodeNoErr {
+		return nil
+	}
+
+	for _, a := range msg.Answers {
+		if a.Type != layers.DNSTypeA && a.Type != layers.DNSTypeAAAA || a.IP == nil {
+			continue
+		}
+		findings = append(findings, DNSAnswerFinding{
+			Name:       string(a.Name),
+			QType:      a.Type.String(),
+			Answer:     a.IP.String(),
+			TTL:        a.TTL,
+			ServerAddr: serverAddr,
+			At:         at,
+		})
+	}
+	return findings
+}
+
 // InspectError implements ErrorPassiveInspector. payload is one complete DNS
 // message, decoded independently of Inspect's own decode of the same bytes —
 // the same second-decode style QueryPassiveInspector already uses.

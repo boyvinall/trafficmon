@@ -129,7 +129,13 @@ func stubHostname(r aggregate.Row) string { return r.RemoteAddr }
 // resolver never resolves anything, which is the state every destination
 // starts in: the bare address, shown until a name arrives.
 func newTestModel(rows []aggregate.Row, width, height int) Model {
-	m := NewModel(context.Background(), nil, nil, nil, "en0")
+	return newTestModelIfaces(rows, width, height, []string{"en0"})
+}
+
+// newTestModelIfaces is newTestModel with an explicit interface list, for the
+// picker tests that need more than one to toggle between.
+func newTestModelIfaces(rows []aggregate.Row, width, height int, ifaces []string) Model {
+	m := NewModel(context.Background(), nil, nil, nil, ifaces)
 	m.rows = rows
 	m.now = testNow
 	m.width, m.height = width, height
@@ -258,6 +264,7 @@ var specialKeys = map[string]tea.KeyType{
 	"tab":       tea.KeyTab,
 	"enter":     tea.KeyEnter,
 	"esc":       tea.KeyEsc,
+	" ":         tea.KeySpace,
 	"backspace": tea.KeyBackspace,
 	"ctrl+c":    tea.KeyCtrlC,
 	"ctrl+b":    tea.KeyCtrlB,

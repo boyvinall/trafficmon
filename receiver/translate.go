@@ -401,6 +401,8 @@ func addDNSQueryLogRecord(records plog.LogRecordSlice, q dpi.QueryFinding, now t
 	lr := records.AppendEmpty()
 	lr.SetTimestamp(pcommon.NewTimestampFromTime(q.At))
 	lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(now))
+	lr.SetSeverityNumber(plog.SeverityNumberInfo)
+	lr.SetSeverityText(plog.SeverityNumberInfo.String())
 	lr.Body().SetStr(q.Name)
 
 	attrs := lr.Attributes()
@@ -416,6 +418,8 @@ func addSYNLogRecord(records plog.LogRecordSlice, ev capture.SYNEvent, now time.
 	lr := records.AppendEmpty()
 	lr.SetTimestamp(pcommon.NewTimestampFromTime(ev.At))
 	lr.SetObservedTimestamp(pcommon.NewTimestampFromTime(now))
+	lr.SetSeverityNumber(plog.SeverityNumberInfo)
+	lr.SetSeverityText(plog.SeverityNumberInfo.String())
 	lr.Body().SetStr(fmt.Sprintf("SYN %d %s (last %s)", attemptCount, key, synAttemptWindow))
 
 	attrs := lr.Attributes()

@@ -25,9 +25,32 @@ const TickInterval = time.Second
 // appName is the title shown at the left of the header bar.
 const appName = "trafficmon"
 
-// chromeLines is how many lines View spends on furniture rather than data: the
-// header bar, the column titles and the footer.
-const chromeLines = 3
+// connChromeLines and eventsChromeLines are how many lines View spends on
+// furniture rather than data in each panel: the panel's top and bottom
+// border, its column-title line, and — for Connections only — the header
+// line above it (Events has no breadcrumb header of its own). The footer
+// below both panels is accounted for separately, once per View, since it is
+// shared rather than belonging to either panel.
+const (
+	connChromeLines   = 4
+	eventsChromeLines = 3
+)
+
+// panelTitle and eventsPanelTitle are the two panels' border-inlaid titles.
+const (
+	panelTitle       = "Connections"
+	eventsPanelTitle = "Events"
+)
+
+// eventsHeightFraction is the default share of the two-panel area the events
+// panel takes on the first WindowSizeMsg: one part in four, connections
+// taking the rest.
+const eventsHeightFraction = 4
+
+// minPanelDataRows is the fewest data rows either panel is ever left with,
+// whether from the default split or from dragging the divider: enough that a
+// panel squeezed all the way down still shows something.
+const minPanelDataRows = 3
 
 // defaultPageSize is how far PgUp/PgDn move the cursor before the terminal
 // height is known and a real screenful can be measured.
@@ -60,6 +83,16 @@ const maxFilterLabel = 16
 
 type tickMsg time.Time
 
+// panelFocus is which of the two panels — Connections or Events — currently
+// has the keyboard, cycled with FocusNext (tab). focusConnections is the
+// zero value, which is what NewModel starts with.
+type panelFocus uint8
+
+const (
+	focusConnections panelFocus = iota
+	focusEvents
+)
+
 // Model is the root Bubble Tea model.
 //
 // Its methods follow one rule for receivers: a pointer receiver mutates the
@@ -84,7 +117,17 @@ type Model struct {
 	// theoretical.
 	ctx context.Context
 
-	iface  string
+	// interfaces is every interface capture was told about at startup, in the
+	// order the picker lists them. activeInterfaces says which of them are
+	// currently shown, all true until `i` narrows them — a display filter
+	// over rows capture already produced, never a capture restart.
+	interfaces       []string
+	activeInterfaces map[string]bool
+	// showIfacePicker and ifaceCursor are the interface picker's own state,
+	// the same shape showHelp/cursor take for the help overlay and table.
+	showIfacePicker bool
+	ifaceCursor     int
+
 	keys   KeyMap
 	styles Styles
 	// help renders both the footer hint line and the `?` overlay from keys,
@@ -95,7 +138,11 @@ type Model struct {
 	// The zero value, aggregate.GroupNone, is what NewModel starts with:
 	// one row per open connection.
 	grouping aggregate.Grouping
-	sort     SortKey
+	// sort is the column driving row order, cycled with `s`. NewModel starts
+	// it on SortPID rather than the zero value SortRate: which process is
+	// which stays put from one refresh to the next, unlike rate or total,
+	// so the table doesn't reshuffle itself the moment traffic starts.
+	sort SortKey
 
 	// snap is the most recent aggregator snapshot, kept so that a change of
 	// mode, grouping, sort or filter can rebuild the table from it on the very
@@ -129,13 +176,75 @@ type Model struct {
 	// one.
 	filterBefore string
 
+	// showListening says whether rows for TCP sockets in the LISTEN state are
+	// shown. It starts true — every socket enumeration already reported them,
+	// so hiding them is an opt-in narrowing, not the default — and `l` flips
+	// it. Only the ungrouped view ever sets Row.State (see aggregate.Row's
+	// grouped constructors), so a grouped view is unaffected either way.
+	showListening bool
+	// showTCP and showUDP say whether rows for each transport protocol are
+	// shown, toggled independently by `t` and `u`. Both start true for the
+	// same reason showListening does, and are just as much a no-op on a
+	// grouped view: only the ungrouped view ever sets Row.Proto.
+	showTCP, showUDP bool
+	// showIPv4 and showIPv6 say whether rows whose remote address is of each
+	// family are shown, toggled independently by `4` and `6`. Both start
+	// true for the same reason showListening does; a row whose remote
+	// address does not parse as an IP at all is unaffected by either, the
+	// same "unclassified rows are never hidden" rule showTCP/showUDP follow.
+	showIPv4, showIPv6 bool
+	// showPrivate says whether rows whose remote address is RFC1918/RFC4193
+	// private are shown, toggled by `P`. It starts true for the same reason
+	// showListening does, and is a no-op on a row whose remote address does
+	// not parse.
+	showPrivate bool
+
+	// events is the events panel's own bounded history, appended to at the
+	// end of every refresh — see appendEvents. Snapshot itself drops its five
+	// event streams on the very next Refresh, so this ring is the only place
+	// they are retained across ticks.
+	events eventRing
+	// eventsCursor is the events panel's own scroll position, independent of
+	// the connections table's cursor: the two panels are scrolled separately
+	// even though only one of them has focus at a time.
+	eventsCursor int
+	// eventsWindowTop is the index of the first row the events panel currently
+	// shows. Unlike the connections table (which recomputes its window purely
+	// from the cursor via visibleWindow, re-anchoring the cursor to whichever
+	// edge it crosses), the events panel keeps this as its own state so the
+	// cursor can move freely within an already-visible window — the window
+	// itself only shifts once the cursor would otherwise leave it. See
+	// eventsWindowStart.
+	eventsWindowTop int
+	// focus says which panel movement keys act on. zoomed gives that panel
+	// the full height (border kept) and hides the other entirely; Esc
+	// (Unzoom) is the only way back out, since FocusNext is a no-op while
+	// zoomed.
+	focus  panelFocus
+	zoomed bool
+	// eventsPanelRows is the events panel's own height in data rows (not
+	// counting its border/column-header chrome) while not zoomed. It starts
+	// at zero and is seeded to the eventsHeightFraction default by the first
+	// WindowSizeMsg (see resizePanels), then adjusted by dragging the
+	// divider. A later resize re-derives it from the *fraction* of the
+	// two-panel area it occupied rather than carrying over an absolute row
+	// count, so a terminal resize does not leave the split's proportions
+	// stale.
+	eventsPanelRows int
+	// draggingDivider and dragRow track an in-progress click-drag on the
+	// divider between the two panels; dragRow is the terminal row the drag
+	// last moved through, so each motion event only has to apply its own
+	// delta.
+	draggingDivider bool
+	dragRow         int
+
 	width, height int
 }
 
 // NewModel builds the root model. ctx bounds the reverse-DNS lookups the view
 // starts; res and hostnameCache may each be nil, in which case the hostname
 // sources they provide are simply skipped.
-func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, hostnameCache *dpi.HostnameCache, iface string) Model {
+func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, hostnameCache *dpi.HostnameCache, interfaces []string) Model {
 	input := textinput.New()
 	input.Prompt = filterPrompt
 
@@ -146,16 +255,32 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 	// at a time and the prompt already says where the keyboard is pointing.
 	input.Cursor.SetMode(cursor.CursorStatic)
 
+	active := make(map[string]bool, len(interfaces))
+	for _, name := range interfaces {
+		active[name] = true
+	}
+
+	helpModel := help.New()
+	helpModel.Styles = HelpStyles()
+
 	return Model{
-		agg:           agg,
-		resolver:      res,
-		hostnameCache: hostnameCache,
-		ctx:           ctx,
-		iface:         iface,
-		keys:          DefaultKeyMap(),
-		styles:        DefaultStyles(),
-		help:          help.New(),
-		input:         input,
+		agg:              agg,
+		resolver:         res,
+		hostnameCache:    hostnameCache,
+		ctx:              ctx,
+		interfaces:       interfaces,
+		activeInterfaces: active,
+		keys:             DefaultKeyMap(),
+		styles:           DefaultStyles(),
+		help:             helpModel,
+		input:            input,
+		showListening:    true,
+		showTCP:          true,
+		showUDP:          true,
+		showIPv4:         true,
+		showIPv6:         true,
+		showPrivate:      true,
+		sort:             SortPID,
 	}
 }
 
@@ -220,7 +345,10 @@ func tick() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+		m.resizePanels(msg.Width, msg.Height)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tickMsg:
 		// A paused model freezes its clock along with its rows: `now` is what
@@ -268,22 +396,44 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// The interface picker claims the keyboard the same way, for the same
+	// reason: everything underneath it is out of sight, so only leaving the
+	// program, closing the picker, or acting on the picker itself make sense.
+	if m.showIfacePicker {
+		return m.handleIfacePickerKey(msg)
+	}
+
+	// Esc only means anything while a panel is zoomed — everything else
+	// below applies to whichever panel has focus regardless of zoom, since
+	// zoom only changes layout, not input routing.
+	if m.zoomed && key.Matches(msg, m.keys.Unzoom) {
+		m.zoomed = false
+		return m, nil
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
 
 	case key.Matches(msg, m.keys.Up):
-		m.moveCursor(-1)
+		m.moveSelection(-1)
 	case key.Matches(msg, m.keys.Down):
-		m.moveCursor(1)
+		m.moveSelection(1)
 	case key.Matches(msg, m.keys.PageUp):
-		m.moveCursor(-m.pageSize())
+		m.moveSelection(-m.pageSize())
 	case key.Matches(msg, m.keys.PageDown):
-		m.moveCursor(m.pageSize())
+		m.moveSelection(m.pageSize())
 	case key.Matches(msg, m.keys.Home):
-		m.moveCursor(-len(m.rows))
+		m.moveSelection(-m.selectionLen())
 	case key.Matches(msg, m.keys.End):
-		m.moveCursor(len(m.rows))
+		m.moveSelection(m.selectionLen())
+
+	case key.Matches(msg, m.keys.FocusNext):
+		if !m.zoomed {
+			m.toggleFocus()
+		}
+	case key.Matches(msg, m.keys.Zoom):
+		m.zoomed = true
 
 	case key.Matches(msg, m.keys.Grouping):
 		m.cycleGrouping()
@@ -299,10 +449,45 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Filter):
 		return m, m.openFilter()
 
+	case key.Matches(msg, m.keys.ToggleListening):
+		m.toggleListening()
+	case key.Matches(msg, m.keys.ToggleTCP):
+		m.toggleTCP()
+	case key.Matches(msg, m.keys.ToggleUDP):
+		m.toggleUDP()
+	case key.Matches(msg, m.keys.ToggleIPv4):
+		m.toggleIPv4()
+	case key.Matches(msg, m.keys.ToggleIPv6):
+		m.toggleIPv6()
+	case key.Matches(msg, m.keys.TogglePrivate):
+		m.togglePrivate()
+
 	case key.Matches(msg, m.keys.Pause):
 		m.paused = !m.paused
 	case key.Matches(msg, m.keys.Help):
 		m.showHelp = !m.showHelp
+	case key.Matches(msg, m.keys.Interfaces):
+		m.showIfacePicker = !m.showIfacePicker
+	}
+	return m, nil
+}
+
+// handleIfacePickerKey applies one keypress while the interface picker has
+// the screen: Up/Down move the highlighted interface, space/enter flip it,
+// and everything else that isn't leaving the program or closing the picker
+// is ignored, the same claim on the keyboard the help overlay makes above.
+func (m Model) handleIfacePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, m.keys.Interfaces), msg.Type == tea.KeyEsc:
+		m.showIfacePicker = false
+	case key.Matches(msg, m.keys.Up):
+		m.moveIfaceCursor(-1)
+	case key.Matches(msg, m.keys.Down):
+		m.moveIfaceCursor(1)
+	case msg.Type == tea.KeySpace, msg.Type == tea.KeyEnter:
+		m.toggleActiveInterface()
 	}
 	return m, nil
 }
@@ -399,15 +584,202 @@ func (m *Model) moveCursor(delta int) {
 	m.cursor = clamp(m.cursor+delta, 0, len(m.rows)-1)
 }
 
-// pageSize is how far PgUp/PgDn move the cursor: one screenful, so that paging
-// lines up with what the user can actually see. Until the first
-// tea.WindowSizeMsg arrives there is no screenful to measure, so it falls back
-// to a fixed jump.
+// moveSelection moves whichever panel currently has focus's own cursor by
+// delta: the connections table's cursor, or the events panel's eventsCursor.
+// Zoom does not affect this routing — only which panels are drawn.
+func (m *Model) moveSelection(delta int) {
+	if m.focus == focusEvents {
+		m.moveEventsCursor(delta)
+		return
+	}
+	m.moveCursor(delta)
+}
+
+// moveEventsCursor moves the events panel's own cursor by delta, clamping at
+// both ends the same way moveCursor does for the connections table, then
+// brings eventsWindowTop along just far enough to keep the cursor visible.
+func (m *Model) moveEventsCursor(delta int) {
+	n := m.events.len()
+	if n == 0 {
+		m.eventsCursor = 0
+		m.eventsWindowTop = 0
+		return
+	}
+	m.eventsCursor = clamp(m.eventsCursor+delta, 0, n-1)
+	m.eventsWindowTop = eventsWindowStart(m.eventsWindowTop, m.eventsCursor, n, m.eventsRowLines())
+}
+
+// selectionLen is how many rows the focused panel's cursor moves against —
+// what Home/End clamp to.
+func (m Model) selectionLen() int {
+	if m.focus == focusEvents {
+		return m.events.len()
+	}
+	return len(m.rows)
+}
+
+// toggleFocus swaps which of the two panels the keyboard acts on.
+func (m *Model) toggleFocus() {
+	if m.focus == focusConnections {
+		m.focus = focusEvents
+	} else {
+		m.focus = focusConnections
+	}
+}
+
+// moveIfaceCursor moves the interface picker's highlighted row by delta,
+// clamping at both ends the same way moveCursor does for the table.
+func (m *Model) moveIfaceCursor(delta int) {
+	if len(m.interfaces) == 0 {
+		m.ifaceCursor = 0
+		return
+	}
+	m.ifaceCursor = clamp(m.ifaceCursor+delta, 0, len(m.interfaces)-1)
+}
+
+// toggleActiveInterface flips whether the highlighted interface's rows are
+// shown, redrawing immediately rather than waiting for the next tick — the
+// same immediacy toggleListening/toggleTCP/toggleUDP already have.
+func (m *Model) toggleActiveInterface() {
+	if m.ifaceCursor < 0 || m.ifaceCursor >= len(m.interfaces) {
+		return
+	}
+	name := m.interfaces[m.ifaceCursor]
+	m.activeInterfaces[name] = !m.activeInterfaces[name]
+	m.rebuild()
+}
+
+// pageSize is how far PgUp/PgDn move the focused panel's cursor: one
+// screenful of whichever panel that is, so that paging lines up with what
+// the user can actually see. Until the first tea.WindowSizeMsg arrives there
+// is no screenful to measure, so it falls back to a fixed jump.
 func (m Model) pageSize() int {
-	if n := m.rowLines(); n > 0 {
+	connRows, eventsRows := m.layout()
+	n := connRows
+	if m.focus == focusEvents {
+		n = eventsRows
+	}
+	if n > 0 {
 		return n
 	}
 	return defaultPageSize
+}
+
+// layout computes the data-row budget for the connections and events
+// panels, given the terminal height, the zoom/focus state, and
+// eventsPanelRows. It is the one place that arithmetic is spelled out, so
+// that View's rendering and the mouse divider hit-test can never disagree.
+//
+// The footer always takes exactly one line, even while a panel is zoomed.
+// While zoomed, the focused panel gets everything else and the other panel
+// is not rendered at all (0 rows, no border drawn). Otherwise the events
+// panel gets eventsPanelRows data rows (floored at minPanelDataRows) and
+// connections gets whatever remains, floored the same way — trading away
+// some of the events panel's rows first, since it is the one the user (or
+// the default fraction) sized last.
+func (m Model) layout() (connRows, eventsRows int) {
+	if m.height <= 0 {
+		return 0, 0
+	}
+
+	if m.zoomed {
+		avail := m.splitTotalLines()
+		if m.focus == focusEvents {
+			return 0, max(avail-eventsChromeLines, 1)
+		}
+		return max(avail-connChromeLines, 1), 0
+	}
+
+	total := m.splitTotalLines()
+	eventsRows = max(m.eventsPanelRows, minPanelDataRows)
+	connRows = total - connChromeLines - (eventsRows + eventsChromeLines)
+	if connRows < minPanelDataRows {
+		connRows = minPanelDataRows
+		eventsRows = max(total-connChromeLines-minPanelDataRows-eventsChromeLines, minPanelDataRows)
+	}
+	return connRows, eventsRows
+}
+
+// splitTotalLines is the total lines available to both panels' chrome and
+// data combined: the terminal height minus the one line the footer always
+// takes.
+func (m Model) splitTotalLines() int {
+	return max(m.height-1, 0)
+}
+
+// eventsRowLines is how many data rows the events panel currently has room
+// for, per layout.
+func (m Model) eventsRowLines() int {
+	_, eventsRows := m.layout()
+	return eventsRows
+}
+
+// resizePanels applies a new terminal size. eventsPanelRows is re-derived
+// from the *fraction* of the two-panel area it occupied before the resize,
+// rather than carried over as an absolute row count, so that a terminal
+// resize does not leave the split's proportions stale; the very first resize
+// has no prior fraction to preserve, so it seeds the eventsHeightFraction
+// default instead.
+func (m *Model) resizePanels(width, height int) {
+	frac := 1.0 / float64(eventsHeightFraction)
+	if m.eventsPanelRows > 0 {
+		if prevTotal := m.splitTotalLines(); prevTotal > 0 {
+			frac = float64(m.eventsPanelRows+eventsChromeLines) / float64(prevTotal)
+		}
+	}
+
+	m.width, m.height = width, height
+
+	total := m.splitTotalLines()
+	m.eventsPanelRows = max(int(float64(total)*frac)-eventsChromeLines, minPanelDataRows)
+}
+
+// dividerRow is the terminal row of the line between the two panels — the
+// connections panel's own bottom border — that a mouse press has to land on
+// to start a divider drag. It returns -1 while zoomed, since there is no
+// divider to grab: only one panel is ever on screen.
+func (m Model) dividerRow() int {
+	if m.zoomed {
+		return -1
+	}
+	connRows, _ := m.layout()
+	return connChromeLines + connRows - 1
+}
+
+// adjustEventsPanelRows grows or shrinks the events panel by delta data
+// rows, clamped so neither panel can shrink below minPanelDataRows.
+func (m *Model) adjustEventsPanelRows(delta int) {
+	total := m.splitTotalLines()
+	maxRows := max(total-connChromeLines-eventsChromeLines-minPanelDataRows, minPanelDataRows)
+	m.eventsPanelRows = clamp(m.eventsPanelRows+delta, minPanelDataRows, maxRows)
+}
+
+// handleMouse applies one mouse event: pressing on the divider between the
+// two panels starts a drag, motion while dragging resizes the events panel,
+// and release ends it. Mouse input is ignored entirely while zoomed, since
+// the divider it drags does not exist then.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.zoomed {
+		return m, nil
+	}
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if msg.Y == m.dividerRow() {
+			m.draggingDivider = true
+			m.dragRow = msg.Y
+		}
+	case tea.MouseActionMotion:
+		if m.draggingDivider {
+			delta := msg.Y - m.dragRow
+			m.dragRow = msg.Y
+			// Dragging the divider up (delta < 0) grows the events panel.
+			m.adjustEventsPanelRows(-delta)
+		}
+	case tea.MouseActionRelease:
+		m.draggingDivider = false
+	}
+	return m, nil
 }
 
 // cycleGrouping advances the grouping to the next of the three states —
@@ -425,6 +797,49 @@ func (m *Model) setSort(k SortKey) {
 	m.rebuild()
 }
 
+// toggleListening flips whether LISTEN-state rows are shown, redrawing
+// immediately rather than waiting for the next tick — the same immediacy
+// grouping and sort changes get.
+func (m *Model) toggleListening() {
+	m.showListening = !m.showListening
+	m.rebuild()
+}
+
+// toggleTCP flips whether TCP rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleTCP() {
+	m.showTCP = !m.showTCP
+	m.rebuild()
+}
+
+// toggleUDP flips whether UDP rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleUDP() {
+	m.showUDP = !m.showUDP
+	m.rebuild()
+}
+
+// toggleIPv4 flips whether IPv4 rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleIPv4() {
+	m.showIPv4 = !m.showIPv4
+	m.rebuild()
+}
+
+// toggleIPv6 flips whether IPv6 rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleIPv6() {
+	m.showIPv6 = !m.showIPv6
+	m.rebuild()
+}
+
+// togglePrivate flips whether rows with a private remote address are shown,
+// the same way toggleListening flips LISTEN rows.
+func (m *Model) togglePrivate() {
+	m.showPrivate = !m.showPrivate
+	m.rebuild()
+}
+
 // refresh pulls a fresh snapshot from the aggregator and rebuilds the table
 // from it.
 func (m *Model) refresh(now time.Time) {
@@ -434,7 +849,13 @@ func (m *Model) refresh(now time.Time) {
 		return
 	}
 
-	m.snap = m.agg.Refresh(now)
+	snap := m.agg.Refresh(now)
+	// Copied out before m.snap is overwritten: Refresh drains these five
+	// streams fresh every call and does not retain them (see Snapshot's own
+	// doc comment), so this is the only chance to keep anything that
+	// accumulated since the previous tick.
+	m.appendEvents(snap)
+	m.snap = snap
 	m.now = now
 	m.rebuild()
 }
@@ -452,6 +873,11 @@ func (m *Model) refresh(now time.Time) {
 // exercised with hand-built inputs, no live capture and no root.
 func (m *Model) rebuild() {
 	rows := aggregate.Rows(m.snap, m.grouping)
+	rows = filterListening(rows, m.showListening)
+	rows = filterProto(rows, m.showTCP, m.showUDP)
+	rows = filterIPFamily(rows, m.showIPv4, m.showIPv6)
+	rows = filterPrivate(rows, m.showPrivate)
+	rows = filterIface(rows, m.activeInterfaces)
 	rows = filterRows(rows, m.filter, m.resolveHostname)
 	sortRows(rows, m.sort)
 	m.setRows(rows)
@@ -510,14 +936,20 @@ func clamp(v, lo, hi int) int {
 	return min(max(v, lo), hi)
 }
 
-// View renders the header bar, the table (or the help overlay in its place)
-// and the footer as one frame no taller than the terminal.
+// View renders the header bar and the table (or the help overlay in its
+// place) inside the Connections panel, the events feed inside the Events
+// panel below it, and the footer below both, as one frame no taller than the
+// terminal. While zoomed only the focused panel's own bordered box is drawn,
+// per layout.
 func (m Model) View() string {
-	lines := []string{m.viewHeader()}
-	if m.showHelp {
-		lines = append(lines, m.viewHelp()...)
-	} else {
-		lines = append(lines, m.viewTable()...)
+	connRows, eventsRows := m.layout()
+
+	var lines []string
+	if connRows > 0 {
+		lines = append(lines, m.viewConnPanel()...)
+	}
+	if eventsRows > 0 {
+		lines = append(lines, m.viewEventsPanel()...)
 	}
 	lines = append(lines, m.viewFooter())
 
@@ -546,8 +978,36 @@ func (m Model) View() string {
 	return strings.Join(lines, "\n")
 }
 
+// viewConnPanel renders the Connections panel: the header bar and the table
+// (or the help overlay/interface picker in its place), inside a bordered box
+// sized from rowLines/layout.
+func (m Model) viewConnPanel() []string {
+	body := []string{m.viewHeader()}
+	switch {
+	case m.showHelp:
+		body = append(body, m.viewHelp()...)
+	case m.showIfacePicker:
+		body = append(body, m.viewIfacePicker()...)
+	default:
+		body = append(body, m.viewTable()...)
+	}
+
+	focused := m.zoomed || m.focus == focusConnections
+	panel := renderPanel(m.styles, panelTitle, m.viewWidth(), len(body)+panelBorderHeight, strings.Join(body, "\n"), focused)
+	return strings.Split(panel, "\n")
+}
+
+// viewEventsPanel renders the Events panel: the SYN/RST/DNS-query/DNS-error
+// feed, inside a bordered box the same way viewConnPanel builds its own.
+func (m Model) viewEventsPanel() []string {
+	body := m.viewEvents()
+	focused := m.zoomed || m.focus == focusEvents
+	panel := renderPanel(m.styles, eventsPanelTitle, m.viewWidth(), len(body)+panelBorderHeight, strings.Join(body, "\n"), focused)
+	return strings.Split(panel, "\n")
+}
+
 // viewHeader renders the title bar: the current grouping on the left, the
-// capture interface and status pushed out to the right.
+// sort/filter status and the toggle badges pushed out to the right.
 func (m Model) viewHeader() string {
 	// The header style already pads a cell either side, so the segments hung
 	// off it must not add a leading space of their own.
@@ -561,29 +1021,50 @@ func (m Model) viewHeader() string {
 	// and a stronger one: rows silently absent from the table look exactly
 	// like traffic that stopped, and unlike the sort there is no mark
 	// anywhere else on the screen to give it away.
-	label := "sort: " + m.sort.String() + " · " + m.iface + " ·"
+	label := "sort: " + m.sort.String()
 	if m.filter != "" {
 		label = "filter: " + truncate(m.filter, maxFilterLabel) + " · " + label
 	}
-	status := m.styles.Breadcrumb.Render(label)
+	status := m.styles.Header.Render(label)
 
-	// The capture flag is the other half of the right-hand end, and the two
-	// are kept apart because they are not equally expendable: the sort and
-	// interface are said elsewhere on the screen, whereas a frozen table looks
-	// exactly like a live one that has gone quiet and only this says which.
-	flag := m.styles.Breadcrumb.Render(" live")
-	if m.paused {
-		flag = m.styles.Paused.Render(" PAUSED ")
+	onOff := func(enable bool, on, off string) string {
+		if enable {
+			return m.styles.Live.Render(on)
+		}
+		return m.styles.Paused.Render(off)
 	}
-	right := status + flag
 
-	return joinEnds(left, right, m.viewWidth())
+	right := strings.Join([]string{
+		status,
+		onOff(m.showListening, "LISTEN", "!LISTEN"),
+		onOff(m.showTCP, "TCP", "!TCP"),
+		onOff(m.showUDP, "UDP", "!UDP"),
+		onOff(m.showIPv4, "IPV4", "!IPV4"),
+		onOff(m.showIPv6, "IPV6", "!IPV6"),
+		onOff(m.showPrivate, "PRIV", "!PRIV"),
+		onOff(m.allInterfacesActive(), "IFACE", "!IFACE"),
+		onOff(!m.paused, "live", "PAUSED"),
+	}, " · ")
+
+	return joinEnds(left, right, m.contentWidth())
+}
+
+// allInterfacesActive reports whether every known interface is currently
+// shown, mirroring the LISTEN/TCP/UDP toggles' convention that true is the
+// unfiltered state.
+func (m Model) allInterfacesActive() bool {
+	for _, name := range m.interfaces {
+		if !m.activeInterfaces[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
-	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname, m.now), m.viewWidth())
+	cols := fitColumns(tableColumns(m.grouping, m.resolveHostname, m.now), m.contentWidth())
 	lines := []string{m.styles.ColumnHeader.Render(tableHeader(cols, m.sort))}
 
 	if len(m.rows) == 0 {
@@ -623,12 +1104,33 @@ func (m Model) emptyBody() string {
 func (m Model) viewHelp() []string {
 	h := m.help
 	h.ShowAll = true
-	h.Width = m.viewWidth()
+	h.Width = m.contentWidth()
 
 	helpLines := strings.Split(h.FullHelpView(m.keys.FullHelp()), "\n")
 	lines := make([]string, 0, 2+len(helpLines))
 	lines = append(lines, m.styles.ColumnHeader.Render("Key reference"), "")
 	lines = append(lines, helpLines...)
+	return m.fit(lines)
+}
+
+// viewIfacePicker renders the interface checklist in place of the table: one
+// checkbox line per interface capture was started with, the highlighted one
+// styled the same way the table's own selected row is.
+func (m Model) viewIfacePicker() []string {
+	lines := make([]string, 0, 2+len(m.interfaces))
+	lines = append(lines, m.styles.ColumnHeader.Render("Interfaces"), "")
+
+	for i, name := range m.interfaces {
+		mark := "[ ]"
+		if m.activeInterfaces[name] {
+			mark = "[x]"
+		}
+		line := pad(mark+" "+name, m.contentWidth(), alignLeft, false)
+		if i == m.ifaceCursor {
+			line = m.styles.Selected.Render(line)
+		}
+		lines = append(lines, line)
+	}
 	return m.fit(lines)
 }
 
@@ -691,12 +1193,17 @@ func (m Model) footerKeys() []key.Binding {
 // for, which is what pins the footer to the bottom of the terminal. A window
 // whose size is not known yet gets the body unchanged.
 func (m Model) fit(lines []string) []string {
-	n := m.rowLines()
+	return fitLines(lines, m.rowLines())
+}
+
+// fitLines is fit's underlying arithmetic, shared with fitEvents: n counts
+// data rows, the column-title line sits above them, and n<=0 means the frame
+// size is not known yet, so lines are returned unchanged.
+func fitLines(lines []string, n int) []string {
 	if n <= 0 {
 		return lines
 	}
 
-	// rowLines counts data rows; the column-title line sits above them.
 	n++
 	for len(lines) < n {
 		lines = append(lines, "")
@@ -704,13 +1211,12 @@ func (m Model) fit(lines []string) []string {
 	return lines[:n]
 }
 
-// rowLines is how many table rows the terminal has room for, or 0 when its
-// height is not known yet and every row is drawn.
+// rowLines is how many connections-table rows the terminal has room for, per
+// layout, or 0 when the terminal size is not known yet and every row is
+// drawn.
 func (m Model) rowLines() int {
-	if m.height <= 0 {
-		return 0
-	}
-	return max(m.height-chromeLines, 1)
+	connRows, _ := m.layout()
+	return connRows
 }
 
 // viewWidth is the terminal width, falling back to a sensible default until
@@ -720,6 +1226,13 @@ func (m Model) viewWidth() int {
 		return defaultWidth
 	}
 	return m.width
+}
+
+// contentWidth is the width available to whatever renders inside the
+// panel — the header line and the table — once renderPanel's own border and
+// padding have taken their share of viewWidth.
+func (m Model) contentWidth() int {
+	return clamp(m.viewWidth()-panelBorderWidth, 1, m.viewWidth())
 }
 
 // visibleWindow returns the half-open range of rows to draw so that the cursor

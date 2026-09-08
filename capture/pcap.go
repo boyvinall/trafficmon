@@ -47,11 +47,9 @@ const readTimeout = 250 * time.Millisecond
 
 // Config controls live packet capture.
 type Config struct {
-	// Interface to capture on. Empty means auto-detect from the default route.
+	// Interface is the interface spec capture opens handles for — see
+	// ResolveInterfaces. Defaults to Any.
 	Interface string
-
-	// IncludeLoopback captures lo0 traffic as well as the primary interface.
-	IncludeLoopback bool
 
 	// SnapLen is the per-packet capture length. It has to cover more than
 	// headers now that DPI inspects payload bytes: 1600 covers any TLS
@@ -86,6 +84,7 @@ type Config struct {
 // DefaultConfig returns the capture defaults.
 func DefaultConfig() Config {
 	return Config{
+		Interface:         Any,
 		SnapLen:           1600,
 		Inspectors:        dpi.DefaultInspectors(),
 		PassiveInspectors: dpi.DefaultPassiveInspectors(),
@@ -118,6 +117,9 @@ type Capturer struct {
 	// dnsErrors holds DNS error findings until the next DrainDNSErrors.
 	dnsErrors *dnsErrorRing
 
+	// dnsAnswers holds DNS answer findings until the next DrainDNSAnswers.
+	dnsAnswers *dnsAnswerRing
+
 	// logFeed streams SYN/DNS-query events to a consumer in real time,
 	// nil unless cfg.EnableLogFeed is set — see logFeed's doc comment.
 	logFeed *logFeed
@@ -138,6 +140,7 @@ func New(cfg Config) *Capturer {
 		synEvents:     newSYNEventRing(),
 		rstEvents:     newRSTEventRing(),
 		dnsErrors:     newDNSErrorRing(),
+		dnsAnswers:    newDNSAnswerRing(),
 		packetStats:   make(map[string]PacketStats),
 	}
 	if cfg.EnableLogFeed {
@@ -189,6 +192,12 @@ func (c *Capturer) DrainDNSErrors() []dpi.DNSErrorFinding {
 	return c.dnsErrors.drain()
 }
 
+// DrainDNSAnswers returns every DNS answer finding captured since the last
+// call and resets the buffer to empty.
+func (c *Capturer) DrainDNSAnswers() []dpi.DNSAnswerFinding {
+	return c.dnsAnswers.drain()
+}
+
 // LogFeed returns the streaming SYN/DNS-query channels a logs consumer can
 // read from directly, as an alternative to the slower Drain*-based ring
 // buffers. ok is false when cfg.EnableLogFeed wasn't set, distinguishing
@@ -219,23 +228,9 @@ func (c *Capturer) Run(ctx context.Context) error {
 		return fmt.Errorf("SnapLen %d out of range [1, %d]", c.cfg.SnapLen, math.MaxInt32)
 	}
 
-	iface := c.cfg.Interface
-	if iface == "" {
-		var err error
-		if iface, err = DefaultInterface(); err != nil { //nolint:contextcheck // DefaultInterface deliberately owns its own short, fixed timeout rather than ctx's
-			return fmt.Errorf("detect interface: %w", err)
-		}
-	}
-
-	ifaces := []string{iface}
-	if c.cfg.IncludeLoopback && !isLoopbackInterface(iface) {
-		// Loopback traffic never reaches the primary interface, so it needs a
-		// handle of its own feeding the same flow map.
-		lb, err := loopbackDeviceName()
-		if err != nil {
-			return fmt.Errorf("loopback interface: %w", err)
-		}
-		ifaces = append(ifaces, lb)
+	ifaces, err := ResolveInterfaces(c.cfg.Interface) //nolint:contextcheck // ResolveInterfaces deliberately owns its own short, fixed timeout(s) rather than ctx's
+	if err != nil {
+		return err
 	}
 
 	locals, err := localAddrSet(ifaces)
@@ -247,9 +242,22 @@ func (c *Capturer) Run(ctx context.Context) error {
 		return found
 	}
 
+	// A spec naming more than one interface is inherently best-effort: some of
+	// what it expands to (a down bridge, a permission-restricted virtual
+	// adapter under Any) is expected to fail to open, and one bad interface
+	// must not take every other one down with it. A single named interface has
+	// nothing to fall back to, so its failure still propagates as it always
+	// has.
+	bestEffort := len(ifaces) > 1
+
 	g, ctx := errgroup.WithContext(ctx)
 	for _, iface := range ifaces {
-		g.Go(func() error { return c.captureOn(ctx, iface, isLocal) })
+		g.Go(func() error {
+			if err := c.captureOn(ctx, iface, isLocal); err != nil && !bestEffort {
+				return err
+			}
+			return nil
+		})
 	}
 	return g.Wait()
 }
@@ -554,6 +562,11 @@ func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.
 		if ei, ok := insp.(dpi.ErrorPassiveInspector); ok {
 			for _, f := range ei.InspectError(payload, info.Src.String(), ts) {
 				c.dnsErrors.push(f)
+			}
+		}
+		if ai, ok := insp.(dpi.AnswerPassiveInspector); ok {
+			for _, f := range ai.InspectAnswer(payload, info.Src.String(), ts) {
+				c.dnsAnswers.push(f)
 			}
 		}
 	}

@@ -44,6 +44,30 @@ func testReceiver() *trafficmonReceiver {
 	return &trafficmonReceiver{cfg: NewDefaultConfig(), logger: zap.NewNop()}
 }
 
+// TestStartResolvesEmptyInterfaceAsAny asserts Start treats an empty
+// Config.Interface as capture.Any, rather than failing config resolution up
+// front, by resolving it the same way capture.ResolveInterfaces(capture.Any)
+// does. Like capture/iface_test.go's own ResolveInterfaces tests, it skips
+// rather than fails if that enumeration itself errors — e.g. no libpcap
+// devices available on the host at all — since that's an environment gap,
+// not a regression in Start. Start returns once the engine's goroutines are
+// launched, before any of them need an actual privileged pcap handle to
+// succeed.
+func TestStartResolvesEmptyInterfaceAsAny(t *testing.T) {
+	if _, err := capture.ResolveInterfaces(capture.Any); err != nil {
+		t.Skipf("capture.ResolveInterfaces(capture.Any) error = %v", err)
+	}
+
+	r := testReceiver()
+
+	if err := r.Start(context.Background(), nil); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if err := r.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v, want nil", err)
+	}
+}
+
 // TestForwardLogsReturnsImmediatelyWhenDisabled asserts forwardLogs bails
 // out as soon as the source reports its log feed isn't enabled, the same
 // path Start takes when no logs consumer is configured — it never reaches

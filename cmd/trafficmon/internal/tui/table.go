@@ -21,7 +21,7 @@ type SortKey uint8
 const (
 	SortRate SortKey = iota
 	SortTotal
-	SortConnections
+	SortPID
 
 	// numSortKeys bounds the `s` cycle, so a new key only has to be added
 	// above. It must stay last.
@@ -35,8 +35,8 @@ func (k SortKey) next() SortKey { return (k + 1) % numSortKeys }
 //
 // The plan gives `r` the narrower job of choosing which of the two bandwidth
 // numbers drives the order, so it flips between rate and total and treats the
-// connection-count sort — which is neither — as "not one of mine", landing on
-// rate. `s` remains the way to reach every key in turn.
+// PID sort — which is neither — as "not one of mine", landing on rate. `s`
+// remains the way to reach every key in turn.
 func (k SortKey) toggleRate() SortKey {
 	if k == SortRate {
 		return SortTotal
@@ -49,22 +49,24 @@ func (k SortKey) String() string {
 	switch k {
 	case SortTotal:
 		return "total"
-	case SortConnections:
-		return "connections"
+	case SortPID:
+		return "pid"
 	default:
 		return "rate"
 	}
 }
 
-// sortRows orders rows by the active sort key, descending.
+// sortRows orders rows by the active sort key: rate and total descending,
+// busiest first; PID ascending, lowest first, matching how every other tool
+// that lists processes orders them.
 func sortRows(rows []aggregate.Row, k SortKey) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		switch k {
 		case SortTotal:
 			return a.BytesInTotal+a.BytesOutTotal > b.BytesInTotal+b.BytesOutTotal
-		case SortConnections:
-			return a.Connections > b.Connections
+		case SortPID:
+			return a.PID < b.PID
 		default: // SortRate
 			return a.RateInBps+a.RateOutBps > b.RateInBps+b.RateOutBps
 		}
@@ -103,6 +105,123 @@ func filterRows(rows []aggregate.Row, q string, hostname func(aggregate.Row) str
 	return out
 }
 
+// listenState is the TCP kernel state name every platform's procinfo backend
+// reports for a socket accepting connections rather than carrying one — see
+// procinfo's per-OS tcpStateName implementations.
+const listenState = "LISTEN"
+
+// filterListening keeps every row when show is true; otherwise it drops rows
+// whose connection is in the LISTEN state — a socket that only ever accepts
+// connections carries no traffic of its own to watch.
+//
+// Only the ungrouped view ever sets Row.State (see aggregate.Row's grouped
+// constructors), so a grouped view is unaffected either way: there is nothing
+// for this to drop until `g` cycles back to ungrouped.
+//
+// The result is built into rows[:0], reusing rows' backing array in place,
+// the same trade filterRows makes and for the same reason.
+func filterListening(rows []aggregate.Row, show bool) []aggregate.Row {
+	if show {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		if r.State != listenState {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// filterProto keeps rows whose transport protocol is currently shown,
+// dropping tcp rows when showTCP is false and udp rows when showUDP is
+// false. A row of any other protocol (icmp, arp, or "" on a grouped view
+// that never sets Row.Proto — see aggregate.Row's grouped constructors) is
+// unaffected by either flag: neither toggle claims to speak for it.
+func filterProto(rows []aggregate.Row, showTCP, showUDP bool) []aggregate.Row {
+	if showTCP && showUDP {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		switch r.Proto {
+		case "tcp":
+			if !showTCP {
+				continue
+			}
+		case "udp":
+			if !showUDP {
+				continue
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// filterIPFamily keeps rows whose remote address family is currently shown,
+// dropping IPv4 rows when showIPv4 is false and IPv6 rows when showIPv6 is
+// false. A row whose remote address does not parse is never hidden, the
+// same "unclassified rows are never hidden" rule filterProto/filterIface
+// apply.
+func filterIPFamily(rows []aggregate.Row, showIPv4, showIPv6 bool) []aggregate.Row {
+	if showIPv4 && showIPv6 {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		ip := net.ParseIP(r.RemoteAddr)
+		switch {
+		case ip == nil:
+			out = append(out, r)
+		case ip.To4() != nil:
+			if showIPv4 {
+				out = append(out, r)
+			}
+		default:
+			if showIPv6 {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// filterPrivate keeps every row when show is true; otherwise it drops rows
+// whose remote address is RFC1918/RFC4193 private, via net.IP.IsPrivate. A
+// row whose remote address does not parse is never hidden, the same
+// convention filterIPFamily/filterProto/filterIface apply.
+func filterPrivate(rows []aggregate.Row, show bool) []aggregate.Row {
+	if show {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		if ip := net.ParseIP(r.RemoteAddr); ip == nil || !ip.IsPrivate() {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// filterIface keeps rows whose capture interface is currently active in
+// active. A row with no interface yet (Iface == "", no traffic seen for this
+// connection) is never hidden, the same "unclassified rows are never
+// hidden" rule filterProto applies to icmp/arp/grouped rows.
+func filterIface(rows []aggregate.Row, active map[string]bool) []aggregate.Row {
+	out := rows[:0]
+	for _, r := range rows {
+		if r.Iface == "" || active[r.Iface] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // alignment is which side of its cell a column's text sits on.
 type alignment uint8
 
@@ -124,13 +243,15 @@ const (
 //
 // The hostname goes first of all, because it is the only column that annotates
 // another one rather than carrying anything of its own: the address it names
-// is still on screen without it. STATE goes next, then PROTO, then AGE, then
-// CONN, then PID. AGE drops ahead of CONN and PID because it is purely
+// is still on screen without it. IFACE goes next — a genuinely new fact, but
+// still supplementary the way HOSTNAME is — then STATE, then PROTO, then AGE,
+// then CONN, then PID. AGE drops ahead of CONN and PID because it is purely
 // supplementary — unlike CONN and PID it names nothing about the row's
-// identity — but it is kept longer than HOSTNAME/STATE/PROTO since it applies
-// to every grouping alike.
+// identity — but it is kept longer than HOSTNAME/IFACE/STATE/PROTO since it
+// applies to every grouping alike.
 const (
 	prioHostname = iota
+	prioIface
 	prioState
 	prioProto
 	prioAge
@@ -151,8 +272,10 @@ const (
 	connWidth     = 5
 	// stateWidth fits "ESTABLISHED", the longest name tcpStateName returns.
 	stateWidth = 11
-	// protoWidth fits "ICMP", the longest label protoLabel returns.
-	protoWidth = 4
+	// protoWidth fits "PROTO", the column's own title — one cell wider than
+	// "ICMP", the longest label protoLabel returns, so the header itself
+	// never has to truncate.
+	protoWidth = 5
 	// ageWidth fits "999d23h", the longest string humanDuration returns.
 	ageWidth = 7
 
@@ -249,7 +372,7 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now
 		if hostname != nil {
 			cols = append(cols, hostnameColumn(hostname))
 		}
-		cols = append(cols, pidColumn(), connColumn())
+		cols = append(cols, ifaceColumn(), pidColumn(), connColumn())
 	case aggregate.GroupByProcessName:
 		// A process name can span several PIDs and local addresses, so
 		// nothing but the label, the remote endpoint and the connection
@@ -258,7 +381,7 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now
 		if hostname != nil {
 			cols = append(cols, hostnameColumn(hostname))
 		}
-		cols = append(cols, connColumn())
+		cols = append(cols, ifaceColumn(), connColumn())
 	default: // aggregate.GroupNone
 		cols = append(cols,
 			localColumn(func(r aggregate.Row) string {
@@ -276,6 +399,7 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now
 		}
 
 		cols = append(cols,
+			ifaceColumn(),
 			column{
 				title: "PROTO",
 				width: protoWidth,
@@ -371,6 +495,16 @@ func hostnameColumn(hostname func(aggregate.Row) string) column {
 	return column{title: "HOSTNAME", align: alignLeft, prio: prioHostname, flex: true, cell: hostname}
 }
 
+// ifaceColumn builds the IFACE column. Unlike PROTO/STATE, Row.Iface is
+// carried through every grouping (see aggregate's rows.go), so this column
+// is shared by all three, the same as REMOTE. It is flexible rather than a
+// fixed width: short on Darwin/Linux ("en0", "eth0") but a raw libpcap NPF
+// device path on Windows ("\Device\NPF_{GUID...}"), and nothing in this
+// codebase resolves that to a friendlier adapter name.
+func ifaceColumn() column {
+	return column{title: "IFACE", align: alignLeft, prio: prioIface, flex: true, cell: func(r aggregate.Row) string { return r.Iface }}
+}
+
 // pidColumn builds the PID column, shared by the ungrouped and by-PID views —
 // the only two where a row names exactly one process instance.
 func pidColumn() column {
@@ -387,6 +521,8 @@ func pidColumn() column {
 			}
 			return strconv.Itoa(int(r.PID))
 		},
+		sortable:  true,
+		sortKey:   SortPID,
 		truncLeft: true,
 	}
 }
@@ -404,7 +540,9 @@ func protoLabel(r aggregate.Row) string {
 
 // connColumn builds the CONN column, shown only once a grouping can roll more
 // than one connection into a row — ungrouped, Connections is always 1 and the
-// column would say nothing.
+// column would say nothing. It is display-only: sorting by connection count
+// is exactly what left ties falling back to PID order feel like a hidden PID
+// sort, so PID is now the explicit sort key instead (see pidColumn).
 func connColumn() column {
 	return column{
 		title:     "CONN",
@@ -412,8 +550,6 @@ func connColumn() column {
 		align:     alignRight,
 		prio:      prioConnections,
 		cell:      func(r aggregate.Row) string { return strconv.Itoa(r.Connections) },
-		sortable:  true,
-		sortKey:   SortConnections,
 		truncLeft: true,
 	}
 }
