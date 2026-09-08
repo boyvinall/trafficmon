@@ -644,24 +644,6 @@ func (m Model) viewHeader() string {
 	return joinEnds(left, right, m.contentWidth())
 }
 
-// hiddenProtos names whichever of tcp/udp is currently switched off, for the
-// header bar — "" when both are shown. Rows silently missing from the table
-// look exactly like traffic that stopped, so whatever caused that is worth
-// naming in the one place a filter and the listening toggle are already
-// named.
-func hiddenProtos(showTCP, showUDP bool) string {
-	switch {
-	case !showTCP && !showUDP:
-		return "tcp+udp"
-	case !showTCP:
-		return "tcp"
-	case !showUDP:
-		return "udp"
-	default:
-		return ""
-	}
-}
-
 // viewTable renders the column titles and as many rows as fit, keeping the
 // cursor on screen.
 func (m Model) viewTable() []string {
