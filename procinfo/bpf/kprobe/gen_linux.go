@@ -4,13 +4,10 @@
 // and why it's a separate compiled object from ../fentry and ../sockstate.
 package kprobe
 
-// amd64 is deliberately not in -target: BPF_KPROBE/BPF_KRETPROBE read
-// struct pt_regs, whose field layout is architecture-specific (x86_64's
-// `di`/`ax` vs. arm64's `regs[N]`), and that struct comes from
-// ../headers/vmlinux.h, which was dumped from this dev environment's own
-// (aarch64) kernel BTF -- it has no x86_64 pt_regs to offer. Compiling for
-// amd64 here fails with "no member named 'di' in 'struct pt_regs'", not a
-// verifier or logic bug. Producing an amd64 object needs a vmlinux.h
-// generated from an actual (or BTF-capable emulated) x86_64 kernel; add
-// that target back once one is available.
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -type event -target arm64 -cc clang Kprobe connect_kprobe.c -- -I../headers -Wall
+// Unlike ../fentry and ../sockstate, connect_kprobe.c can't share one
+// vmlinux.h across -target arches: BPF_KPROBE/BPF_KRETPROBE read struct
+// pt_regs directly (no CO-RE relocation), so the header must supply the
+// real per-architecture pt_regs layout -- see connect_kprobe.c's #include
+// and ../headers/vmlinux_amd64.h's file comment for how each arch's header
+// was produced.
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -type event -target amd64,arm64 -cc clang Kprobe connect_kprobe.c -- -I../headers -Wall

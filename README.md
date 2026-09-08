@@ -19,12 +19,9 @@ socket to enumerate, so those rows come from capture alone and carry no PID.
 - On macOS: Xcode Command Line Tools (`xcode-select --install`) — the
   `procinfo` package uses cgo to bind `libproc`; `libpcap` ships with macOS
 - On Linux: `libpcap-dev` (or your distro's equivalent) is needed to
-  **build** — it provides the headers `capture/pcapdrv` compiles against.
-  At **runtime** the binary loads `libpcap.so` itself rather than linking
-  against it, so a missing runtime package (e.g. `libpcap0.8` on
-  Debian/Ubuntu, `libpcap` on Fedora) fails with a clear, actionable error
-  instead of the dynamic linker refusing to exec the binary at all; socket
-  enumeration is pure Go, parsing `/proc` directly
+  **build**; released binaries link libpcap in statically, so it's not a
+  runtime dependency. Socket enumeration is pure Go, parsing `/proc`
+  directly
 
 ## Build and run
 

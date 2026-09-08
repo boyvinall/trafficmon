@@ -1,10 +1,7 @@
 // Package pcapdrv is the OS-agnostic seam capture/pcap.go uses to open a
 // live pcap handle: a shared Handle interface with one implementation per
 // OS, mirroring the procinfo/route_*.go split so callers never branch on
-// GOOS themselves. On Linux, the implementation loads libpcap via dlopen at
-// runtime instead of linking against it, so a missing libpcap.so produces a
-// clean Go error instead of the dynamic linker refusing to exec the binary
-// at all — see pcapdrv_linux.go.
+// GOOS themselves.
 package pcapdrv
 
 import (

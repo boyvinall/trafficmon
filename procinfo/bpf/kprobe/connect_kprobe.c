@@ -11,7 +11,16 @@
 // state once we know connect() succeeded) via a scratch map. Kept
 // deliberately symmetrical with ../fentry so both attach modes emit
 // identical struct event values downstream.
+// BPF_KPROBE/BPF_KRETPROBE (unlike ../fentry's typed BTF args) read struct
+// pt_regs directly, whose field layout is architecture-specific -- so unlike
+// every other include in this repo's BPF programs, this one can't share a
+// single vmlinux.h across targets and instead picks the header matching
+// bpf2go's -target-selected arch.
+#if defined(__TARGET_ARCH_x86)
+#include "../headers/vmlinux_amd64.h"
+#else
 #include "../headers/vmlinux.h"
+#endif
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
