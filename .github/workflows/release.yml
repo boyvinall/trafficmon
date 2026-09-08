@@ -78,6 +78,14 @@ jobs:
   # symbol-versioning floor and no libpcap.so runtime dependency, so it runs
   # unmodified on any Linux distro/kernel new enough for the syscalls it
   # uses -- not just whatever glibc happened to be on the build host.
+  #
+  # The build itself (make bpf-generate + goreleaser) runs via a plain
+  # `docker run` against the Alpine image, not the `container:` job key: the
+  # GitHub Actions runner cannot execute any JS-based action (actions/checkout,
+  # goreleaser-action) inside an Alpine container on an arm64 runner, only on
+  # x64 -- so checkout happens on the host runner (glibc, unaffected) and
+  # goreleaser is fetched as a plain static binary and invoked with a shell
+  # command instead of goreleaser-action.
   build-linux:
     needs: verify
     strategy:
@@ -85,34 +93,32 @@ jobs:
         include:
           - os: ubuntu-latest
             goarch: amd64
+            goreleaser_arch: x86_64
           - os: ubuntu-24.04-arm
             goarch: arm64
+            goreleaser_arch: arm64
     runs-on: ${{ matrix.os }}
-    container: golang:1.22-alpine
+    env:
+      GORELEASER_VERSION: 2.18.1
     steps:
-      - name: Install build dependencies
-        run: apk add --no-cache gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash jq p7zip
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
-      - name: Generate eBPF bindings
-        run: make bpf-generate
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: latest
-          args: build --single-target --clean --id trafficmon-linux
-      - name: Locate built binary
-        id: bin
-        shell: bash
-        run: echo "path=$(jq -r '.[] | select(.type=="Binary") | .path' dist/artifacts.json)" >> "$GITHUB_OUTPUT"
-      - name: Package binary
-        shell: bash
+      - name: Build and package inside Alpine container
         run: |
-          mkdir -p out
-          cp "${{ steps.bin.outputs.path }}" trafficmon
-          7z a -tzip "out/trafficmon-linux-${{ matrix.goarch }}.zip" trafficmon
+          docker run --rm -v "$PWD:/src" -w /src golang:1.22-alpine sh -c "
+            set -e
+            apk add --no-cache make gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash jq p7zip curl
+            git config --global --add safe.directory /src
+            make bpf-generate
+            curl -sL https://github.com/goreleaser/goreleaser/releases/download/v${GORELEASER_VERSION}/goreleaser_Linux_${{ matrix.goreleaser_arch }}.tar.gz | tar xz -C /usr/local/bin goreleaser
+            goreleaser build --single-target --clean --id trafficmon-linux
+            bin=\$(jq -r '.[] | select(.type==\"Binary\") | .path' dist/artifacts.json)
+            mkdir -p out
+            cp \"\$bin\" trafficmon
+            7z a -tzip out/trafficmon-linux-${{ matrix.goarch }}.zip trafficmon
+          "
       - uses: actions/upload-artifact@v4
         with:
           name: trafficmon-linux-${{ matrix.goarch }}
