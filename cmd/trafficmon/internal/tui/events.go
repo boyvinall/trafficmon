@@ -39,6 +39,36 @@ func (k eventKind) String() string {
 	}
 }
 
+// eventSeverity classifies an eventKind for display: RST and DNS-error rows
+// signal a failure the user likely wants to notice, everything else is
+// routine traffic.
+type eventSeverity uint8
+
+const (
+	severityInfo eventSeverity = iota
+	severityError
+)
+
+// severity reports k's eventSeverity. RST (an unexpected/refused connection)
+// and DNS ERR (a failed lookup) are the only two failure-shaped streams
+// Snapshot carries — SYN, DNS Q and DNS A are all just routine activity.
+func (k eventKind) severity() eventSeverity {
+	switch k {
+	case eventRST, eventDNSError:
+		return severityError
+	default:
+		return severityInfo
+	}
+}
+
+// String names the severity for the LVL column.
+func (s eventSeverity) String() string {
+	if s == severityError {
+		return "ERR"
+	}
+	return "INFO"
+}
+
 // eventRecord is one row in the events panel, formatted for display rather
 // than carrying the raw capture/dpi types: the five source streams
 // (capture.SYNEvent, capture.RSTEvent, dpi.QueryFinding,
@@ -138,7 +168,7 @@ func (m *Model) appendEvents(snap aggregate.Snapshot) {
 			At:     a.At,
 			Kind:   eventDNSAnswer,
 			Remote: a.ServerAddr,
-			Info:   a.Name + " (" + a.QType + ") -> " + a.Answer,
+			Info:   a.Name + " (" + a.QType + ") -> " + a.Answer + " (ttl " + strconv.FormatUint(uint64(a.TTL), 10) + "s)",
 		})
 	}
 
@@ -154,12 +184,13 @@ func (m *Model) appendEvents(snap aggregate.Snapshot) {
 	m.eventsWindowTop = eventsWindowStart(m.eventsWindowTop, m.eventsCursor, m.events.len(), m.eventsRowLines())
 }
 
-// formatEventRow renders one eventRecord's TIME, TYPE, LOCAL, REMOTE and
+// formatEventRow renders one eventRecord's TIME, LVL, TYPE, LOCAL, REMOTE and
 // INFO columns as plain text, before padding — the same shape
 // table.go's per-column cell functions take.
 func formatEventRow(rec eventRecord) []string {
 	return []string{
 		rec.At.Format(eventTimeFormat),
+		rec.Kind.severity().String(),
 		rec.Kind.String(),
 		rec.Local,
 		rec.Remote,
@@ -167,30 +198,35 @@ func formatEventRow(rec eventRecord) []string {
 	}
 }
 
-// Column geometry for the events panel. TIME and TYPE are fixed to the
+// eventSeverityColumn is formatEventRow/eventColumnWidths' index for the LVL
+// column — the only cell renderEventRow colors by severity.
+const eventSeverityColumn = 1
+
+// Column geometry for the events panel. TIME, LVL and TYPE are fixed to the
 // widest value they ever hold; LOCAL/REMOTE are generous enough for a
 // bracketed IPv6 addr:port; INFO takes whatever width is left over.
 const (
-	eventTimeFormat = "15:04:05"
-	eventTimeWidth  = 8  // len(eventTimeFormat's output)
-	eventTypeWidth  = 7  // "DNS ERR", the widest eventKind.String()
-	eventAddrWidth  = 21 // "[2001:db8::1234]:443" plus a little room
+	eventTimeFormat    = "15:04:05"
+	eventTimeWidth     = 8  // len(eventTimeFormat's output)
+	eventSeverityWidth = 4  // "INFO", the widest eventSeverity.String()
+	eventTypeWidth     = 7  // "DNS ERR", the widest eventKind.String()
+	eventAddrWidth     = 21 // "[2001:db8::1234]:443" plus a little room
 )
 
 // eventInfoWidth is how wide the INFO column gets: whatever contentWidth
-// leaves over once the other four columns and their gaps are accounted for,
+// leaves over once the other five columns and their gaps are accounted for,
 // floored at minLabelWidth the same way table.go's flexible columns are.
 func eventInfoWidth(contentWidth int) int {
-	fixed := eventTimeWidth + eventTypeWidth + eventAddrWidth*2 + colGap*4
+	fixed := eventTimeWidth + eventSeverityWidth + eventTypeWidth + eventAddrWidth*2 + colGap*5
 	return clamp(contentWidth-fixed, minLabelWidth, contentWidth)
 }
 
 // eventColumnTitles and eventColumnWidths line up positionally with
 // formatEventRow's output.
-var eventColumnTitles = []string{"TIME", "TYPE", "LOCAL", "REMOTE", "INFO"}
+var eventColumnTitles = []string{"TIME", "LVL", "TYPE", "LOCAL", "REMOTE", "INFO"}
 
 func eventColumnWidths(infoWidth int) []int {
-	return []int{eventTimeWidth, eventTypeWidth, eventAddrWidth, eventAddrWidth, infoWidth}
+	return []int{eventTimeWidth, eventSeverityWidth, eventTypeWidth, eventAddrWidth, eventAddrWidth, infoWidth}
 }
 
 // renderEventHeader renders the events panel's column-title line.
@@ -203,15 +239,45 @@ func renderEventHeader(infoWidth int) string {
 	return strings.Join(cells, strings.Repeat(" ", colGap))
 }
 
-// renderEventRow renders one eventRecord as plain, unstyled text of exactly
-// the events panel's row width.
-func renderEventRow(rec eventRecord, infoWidth int) string {
+// renderEventRow renders one eventRecord at exactly the events panel's row
+// width. Only the LVL cell carries any foreground color — green for INFO,
+// red for ERR — so an otherwise-routine SYN/DNS-query/DNS-answer row and an
+// error row (RST, DNS ERR) read the same everywhere except that one column.
+//
+// selected reproduces the cursor highlight per cell rather than wrapping the
+// whole already-rendered line in styles.Selected the way the connections
+// table does for a plain-text row: each styled cell's own trailing reset
+// code would otherwise switch the outer Reverse back off for every cell
+// after it, since SGR resets aren't scoped to the style that emitted
+// them — they clear every attribute in effect on the terminal, including
+// ones an enclosing style turned on before this string even started.
+func renderEventRow(rec eventRecord, infoWidth int, styles Styles, selected bool) string {
 	cells := formatEventRow(rec)
 	widths := eventColumnWidths(infoWidth)
 	for i, w := range widths {
 		cells[i] = pad(cells[i], w, alignLeft, false)
 	}
-	return strings.Join(cells, strings.Repeat(" ", colGap))
+
+	lvlColor := styles.EventInfo
+	if rec.Kind.severity() == severityError {
+		lvlColor = styles.EventError
+	}
+
+	sep := strings.Repeat(" ", colGap)
+	if !selected {
+		cells[eventSeverityColumn] = lvlColor.Render(cells[eventSeverityColumn])
+		return strings.Join(cells, sep)
+	}
+
+	lvlSelected := styles.Selected.Foreground(lvlColor.GetForeground())
+	for i, cell := range cells {
+		style := styles.Selected
+		if i == eventSeverityColumn {
+			style = lvlSelected
+		}
+		cells[i] = style.Render(cell)
+	}
+	return strings.Join(cells, styles.Selected.Render(sep))
 }
 
 // emptyEventsMessage stands in for the events panel body before any
@@ -270,11 +336,7 @@ func (m Model) viewEvents() []string {
 
 	start, end := eventsVisibleWindow(m.eventsWindowTop, m.eventsCursor, len(items), m.eventsRowLines())
 	for i, rec := range items[start:end] {
-		line := renderEventRow(rec, infoWidth)
-		if start+i == m.eventsCursor {
-			line = m.styles.Selected.Render(line)
-		}
-		lines = append(lines, line)
+		lines = append(lines, renderEventRow(rec, infoWidth, m.styles, start+i == m.eventsCursor))
 	}
 	return m.fitEvents(lines)
 }

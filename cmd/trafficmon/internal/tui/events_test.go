@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestAppendEventsMergesStreamsByTimestamp(t *testing.T) {
 			At: testNow.Add(3 * time.Second),
 		}},
 		DNSAnswers: []dpi.DNSAnswerFinding{{
-			Name: "good.example", QType: "A", Answer: "9.9.9.9", ServerAddr: "8.8.8.8",
+			Name: "good.example", QType: "A", Answer: "9.9.9.9", TTL: 300, ServerAddr: "8.8.8.8",
 			At: testNow.Add(5 * time.Second),
 		}},
 	}
@@ -106,8 +107,8 @@ func TestAppendEventsMergesStreamsByTimestamp(t *testing.T) {
 	if got := items[2].Local; got != "" {
 		t.Errorf("DNS error local = %q, want blank (no client address at that layer)", got)
 	}
-	if got := items[4].Info; got != "good.example (A) -> 9.9.9.9" {
-		t.Errorf("DNS answer info = %q, want %q", got, "good.example (A) -> 9.9.9.9")
+	if got := items[4].Info; got != "good.example (A) -> 9.9.9.9 (ttl 300s)" {
+		t.Errorf("DNS answer info = %q, want %q", got, "good.example (A) -> 9.9.9.9 (ttl 300s)")
 	}
 }
 
@@ -234,6 +235,86 @@ func TestViewEventsHighlightsSelectedRowRegardlessOfFocus(t *testing.T) {
 	}
 }
 
+func TestEventKindSeverities(t *testing.T) {
+	tests := map[eventKind]eventSeverity{
+		eventSYN:       severityInfo,
+		eventRST:       severityError,
+		eventDNSQuery:  severityInfo,
+		eventDNSError:  severityError,
+		eventDNSAnswer: severityInfo,
+	}
+	for k, want := range tests {
+		if got := k.severity(); got != want {
+			t.Errorf("%v.severity() = %v, want %v", k, got, want)
+		}
+	}
+}
+
+// TestRenderEventRowColorsOnlyTheSeverityColumn locks in the requirement
+// that severity coloring is confined to the LVL cell: every other cell in
+// an error row must render byte-for-byte the same as it would in an info
+// row, with only the LVL text itself wrapped in color.
+func TestRenderEventRowColorsOnlyTheSeverityColumn(t *testing.T) {
+	withANSI(t)
+	styles := DefaultStyles()
+	const infoWidth = 30
+
+	for _, rec := range []eventRecord{
+		{At: testNow, Kind: eventSYN, Local: "1.2.3.4:1000", Remote: "5.6.7.8:443", Info: "en0"},
+		{At: testNow, Kind: eventRST, Local: "1.2.3.4:1000", Remote: "5.6.7.8:443", Info: "en0"},
+	} {
+		got := renderEventRow(rec, infoWidth, styles, false)
+
+		cells := formatEventRow(rec)
+		widths := eventColumnWidths(infoWidth)
+		for i, w := range widths {
+			cells[i] = pad(cells[i], w, alignLeft, false)
+		}
+		lvlStyle := styles.EventInfo
+		if rec.Kind.severity() == severityError {
+			lvlStyle = styles.EventError
+		}
+		cells[eventSeverityColumn] = lvlStyle.Render(cells[eventSeverityColumn])
+		want := strings.Join(cells, strings.Repeat(" ", colGap))
+
+		if got != want {
+			t.Errorf("renderEventRow(%v kind) = %q, want %q (only the LVL cell should carry color)", rec.Kind, got, want)
+		}
+	}
+}
+
+// TestRenderEventRowSelectedStaysHighlightedPastTheSeverityColumn is a
+// regression test for embedding one ANSI-styled cell (the LVL column) inside
+// a row that itself gets wrapped in another style: a naive
+// styles.Selected.Render(wholeLine) turns the highlight off for every column
+// after LVL, because the LVL cell's own reset code clears the outer
+// Reverse too. Every cell, LVL included, must still read as selected.
+func TestRenderEventRowSelectedStaysHighlightedPastTheSeverityColumn(t *testing.T) {
+	withANSI(t)
+	styles := DefaultStyles()
+	rec := eventRecord{At: testNow, Kind: eventRST, Local: "1.2.3.4:1000", Remote: "5.6.7.8:443", Info: "en0"}
+	const infoWidth = 30
+
+	got := renderEventRow(rec, infoWidth, styles, true)
+
+	cells := formatEventRow(rec)
+	widths := eventColumnWidths(infoWidth)
+	for i, w := range widths {
+		cells[i] = pad(cells[i], w, alignLeft, false)
+	}
+	// TYPE is the cell right after LVL — exactly where the bug would show:
+	// unstyled once the preceding cell's own reset code fired.
+	typeCol := eventSeverityColumn + 1
+	if plain := cells[typeCol]; !strings.Contains(got, styles.Selected.Render(plain)) {
+		t.Errorf("TYPE cell after LVL is not selection-highlighted in %q", got)
+	}
+	// REMOTE, further still, must stay highlighted too.
+	remoteCol := typeCol + 2
+	if plain := cells[remoteCol]; !strings.Contains(got, styles.Selected.Render(plain)) {
+		t.Errorf("REMOTE cell after LVL is not selection-highlighted in %q", got)
+	}
+}
+
 func TestEventKindStrings(t *testing.T) {
 	tests := map[eventKind]string{
 		eventSYN:       "SYN",
@@ -256,7 +337,7 @@ func TestFormatEventRow(t *testing.T) {
 	}
 
 	got := formatEventRow(rec)
-	want := []string{testNow.Format(eventTimeFormat), "SYN", "1.2.3.4:5000", "5.6.7.8:443", "en0"}
+	want := []string{testNow.Format(eventTimeFormat), "INFO", "SYN", "1.2.3.4:5000", "5.6.7.8:443", "en0"}
 	if len(got) != len(want) {
 		t.Fatalf("formatEventRow = %v, want %v", got, want)
 	}

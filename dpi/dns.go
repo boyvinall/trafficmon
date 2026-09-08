@@ -69,6 +69,7 @@ func (d *DNSAnswerInspector) InspectAnswer(payload []byte, serverAddr string, at
 			Name:       string(a.Name),
 			QType:      a.Type.String(),
 			Answer:     a.IP.String(),
+			TTL:        a.TTL,
 			ServerAddr: serverAddr,
 			At:         at,
 		})

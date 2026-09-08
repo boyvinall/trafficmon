@@ -157,6 +157,7 @@ type DNSAnswerFinding struct {
 	Name       string
 	QType      string
 	Answer     string
+	TTL        uint32
 	ServerAddr string
 	At         time.Time
 }

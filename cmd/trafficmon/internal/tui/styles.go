@@ -41,6 +41,12 @@ type Styles struct {
 	// Closed dims rows whose connections have all gone away but are still
 	// inside the grace period.
 	Closed lipgloss.Style
+	// EventInfo colors the events panel's LVL cell for an info-severity row
+	// (SYN, DNS Q, DNS A) — the only colored cell in an otherwise-plain row.
+	EventInfo lipgloss.Style
+	// EventError is EventInfo's counterpart for an error-severity row (RST,
+	// DNS ERR).
+	EventError lipgloss.Style
 	// ColumnHeader marks out the table's title row from the data beneath it.
 	ColumnHeader lipgloss.Style
 	// PanelTitle renders a panel's name, inlaid into its top border.
@@ -64,6 +70,8 @@ func DefaultStyles() Styles {
 		Footer:            lipgloss.NewStyle().Bold(true).Foreground(colorTitle).Padding(0, 1),
 		Selected:          lipgloss.NewStyle().Reverse(true),
 		Closed:            lipgloss.NewStyle().Faint(true),
+		EventInfo:         lipgloss.NewStyle().Foreground(colorOK),
+		EventError:        lipgloss.NewStyle().Foreground(colorFail),
 		ColumnHeader:      lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		PanelTitle:        lipgloss.NewStyle().Bold(true).Foreground(colorTitle),
 		PanelTitleBlurred: lipgloss.NewStyle().Foreground(colorTitleBlurred),

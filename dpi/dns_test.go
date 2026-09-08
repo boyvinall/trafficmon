@@ -141,6 +141,66 @@ func TestDNSAnswerInspectorInspectError(t *testing.T) {
 	})
 }
 
+func TestDNSAnswerInspectorInspectAnswer(t *testing.T) {
+	inspector := NewDNSAnswerInspector()
+	now := time.Now()
+
+	t.Run("A and AAAA answers carry their own TTL", func(t *testing.T) {
+		msg := &layers.DNS{QR: true, ResponseCode: layers.DNSResponseCodeNoErr, ANCount: 2}
+		msg.Questions = append(msg.Questions, layers.DNSQuestion{
+			Name: []byte("example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+		})
+		msg.Answers = append(msg.Answers,
+			layers.DNSResourceRecord{Name: []byte("example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN, TTL: 300, IP: net.IPv4(93, 184, 216, 34)},
+			layers.DNSResourceRecord{Name: []byte("example.com"), Type: layers.DNSTypeAAAA, Class: layers.DNSClassIN, TTL: 60, IP: net.ParseIP("2606:2800:21f:cb07:6820:80da:af6b:8b2c")},
+		)
+
+		got := inspector.InspectAnswer(dnsMessage(t, msg), "8.8.8.8", now)
+		want := []DNSAnswerFinding{
+			{Name: "example.com", QType: "A", Answer: "93.184.216.34", TTL: 300, ServerAddr: "8.8.8.8", At: now},
+			{Name: "example.com", QType: "AAAA", Answer: "2606:2800:21f:cb07:6820:80da:af6b:8b2c", TTL: 60, ServerAddr: "8.8.8.8", At: now},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("InspectAnswer() = %+v, want %+v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("InspectAnswer()[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("NXDOMAIN response has no answer to report", func(t *testing.T) {
+		msg := &layers.DNS{QR: true, ResponseCode: layers.DNSResponseCodeNXDomain}
+		msg.Questions = append(msg.Questions, layers.DNSQuestion{
+			Name: []byte("nonexistent.example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+		})
+		if got := inspector.InspectAnswer(dnsMessage(t, msg), "8.8.8.8", now); got != nil {
+			t.Fatalf("InspectAnswer() = %+v for an error response, want nil", got)
+		}
+	})
+
+	t.Run("query", func(t *testing.T) {
+		msg := &layers.DNS{QR: false}
+		msg.Questions = append(msg.Questions, layers.DNSQuestion{
+			Name: []byte("example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN,
+		})
+		if got := inspector.InspectAnswer(dnsMessage(t, msg), "8.8.8.8", now); got != nil {
+			t.Fatalf("InspectAnswer() = %+v for a query, want nil", got)
+		}
+	})
+
+	t.Run("garbage", func(t *testing.T) {
+		garbage := make([]byte, 100)
+		for i := range garbage {
+			garbage[i] = byte(i)
+		}
+		if got := inspector.InspectAnswer(garbage, "8.8.8.8", now); got != nil {
+			t.Fatalf("InspectAnswer() = %+v for garbage bytes, want nil", got)
+		}
+	})
+}
+
 func TestDNSAnswerInspectorCandidate(t *testing.T) {
 	tests := []struct {
 		name string
