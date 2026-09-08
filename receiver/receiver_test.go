@@ -45,11 +45,19 @@ func testReceiver() *trafficmonReceiver {
 }
 
 // TestStartResolvesEmptyInterfaceAsAny asserts Start treats an empty
-// Config.Interface as capture.Any (ResolveInterfaces itself needs no root
-// or live pcap handle to expand it), rather than failing config resolution
-// up front. Start returns once the engine's goroutines are launched, before
-// any of them need an actual privileged pcap handle to succeed.
+// Config.Interface as capture.Any, rather than failing config resolution up
+// front, by resolving it the same way capture.ResolveInterfaces(capture.Any)
+// does. Like capture/iface_test.go's own ResolveInterfaces tests, it skips
+// rather than fails if that enumeration itself errors — e.g. no libpcap
+// devices available on the host at all — since that's an environment gap,
+// not a regression in Start. Start returns once the engine's goroutines are
+// launched, before any of them need an actual privileged pcap handle to
+// succeed.
 func TestStartResolvesEmptyInterfaceAsAny(t *testing.T) {
+	if _, err := capture.ResolveInterfaces(capture.Any); err != nil {
+		t.Skipf("capture.ResolveInterfaces(capture.Any) error = %v", err)
+	}
+
 	r := testReceiver()
 
 	if err := r.Start(context.Background(), nil); err != nil {
