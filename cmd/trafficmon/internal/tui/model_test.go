@@ -724,9 +724,9 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 // modelState is everything a keypress can observably change, rendered so that
 // a test can tell "the model reacted" from "the model did not".
 func modelState(m Model, cmd tea.Cmd) string {
-	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t showIfacePicker=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t quit=%t",
+	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t showIfacePicker=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t showIPv4=%t showIPv6=%t showPrivate=%t quit=%t",
 		m.grouping, m.sort, m.cursor,
-		rowLabels(m), m.paused, m.showHelp, m.showIfacePicker, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, cmd != nil)
+		rowLabels(m), m.paused, m.showHelp, m.showIfacePicker, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, m.showIPv4, m.showIPv6, m.showPrivate, cmd != nil)
 }
 
 // rowLabels is the labels of the rows on screen, in order.
@@ -927,6 +927,94 @@ func TestToggleTCPAndUDPHideEachProtocolIndependently(t *testing.T) {
 	m, _ = press(t, m, "u")
 	if !m.showTCP || !m.showUDP {
 		t.Fatalf("toggling twice did not restore both protocols")
+	}
+	if len(m.rows) != total {
+		t.Errorf("rows = %v, want every row restored", rowLabels(m))
+	}
+}
+
+func TestToggleIPv4AndIPv6HideEachFamilyIndependently(t *testing.T) {
+	snap := aggregate.Snapshot{
+		At: testNow,
+		Connections: []aggregate.ConnectionRecord{
+			{PID: 412, ProcessName: "curl", LocalPort: 51000, RemoteAddr: "1.2.3.4", RemotePort: 443, Proto: "tcp", LastSeen: testNow},
+			{PID: 413, ProcessName: "curl6", LocalPort: 51001, RemoteAddr: "2001:db8::1", RemotePort: 443, Proto: "tcp", LastSeen: testNow},
+		},
+	}
+
+	m := newTestModel(nil, 200, 12)
+	m.snap = snap
+	m.rebuild()
+	total := len(m.rows)
+	if total != 2 {
+		t.Fatalf("setup has %d rows, want 2 (one ipv4, one ipv6)", total)
+	}
+
+	m, _ = press(t, m, "4")
+	if m.showIPv4 {
+		t.Fatalf("4 did not hide ipv4")
+	}
+	for _, r := range m.rows {
+		if r.RemoteAddr == "1.2.3.4" {
+			t.Errorf("an ipv4 row survived hiding ipv4: %+v", r)
+		}
+	}
+	if !strings.Contains(m.View(), "!IPV4") {
+		t.Errorf("header does not say ipv4 is hidden:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "6")
+	if m.showIPv6 {
+		t.Fatalf("6 did not hide ipv6")
+	}
+	if len(m.rows) != 0 {
+		t.Errorf("rows = %v, want none once both families are hidden", rowLabels(m))
+	}
+	if !strings.Contains(m.View(), "!IPV4") || !strings.Contains(m.View(), "!IPV6") {
+		t.Errorf("header does not say both families are hidden:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "4")
+	m, _ = press(t, m, "6")
+	if !m.showIPv4 || !m.showIPv6 {
+		t.Fatalf("toggling twice did not restore both families")
+	}
+	if len(m.rows) != total {
+		t.Errorf("rows = %v, want every row restored", rowLabels(m))
+	}
+}
+
+func TestTogglePrivateHidesAndRestoresPrivateRows(t *testing.T) {
+	snap := aggregate.Snapshot{
+		At: testNow,
+		Connections: []aggregate.ConnectionRecord{
+			{PID: 412, ProcessName: "curl", LocalPort: 51000, RemoteAddr: "1.2.3.4", RemotePort: 443, Proto: "tcp", LastSeen: testNow},
+			{PID: 413, ProcessName: "ssh-internal", LocalPort: 51001, RemoteAddr: "192.168.1.10", RemotePort: 22, Proto: "tcp", LastSeen: testNow},
+		},
+	}
+
+	m := newTestModel(nil, 200, 12)
+	m.snap = snap
+	m.rebuild()
+	total := len(m.rows)
+	if total != 2 {
+		t.Fatalf("setup has %d rows, want 2 (one public, one private)", total)
+	}
+
+	m, _ = press(t, m, "P")
+	if m.showPrivate {
+		t.Fatalf("P did not hide private endpoints")
+	}
+	if got := rowLabels(m); len(got) != 1 || slices.Contains(got, "ssh-internal") {
+		t.Errorf("rows = %v, want the private row dropped", got)
+	}
+	if !strings.Contains(m.View(), "!PRIV") {
+		t.Errorf("header does not say private endpoints are hidden:\n%s", m.View())
+	}
+
+	m, _ = press(t, m, "P")
+	if !m.showPrivate {
+		t.Fatalf("P did not restore private endpoints")
 	}
 	if len(m.rows) != total {
 		t.Errorf("rows = %v, want every row restored", rowLabels(m))
@@ -1277,7 +1365,14 @@ func TestFilterIsClearedByCommittingNothing(t *testing.T) {
 }
 
 func TestFilterIsVisibleWhileItIsInForce(t *testing.T) {
-	m := pressAll(t, newLiveModel(), "/", "s", "s", "h")
+	// Widened past newLiveModel's default 100 columns: the header also
+	// carries the LISTEN/TCP/UDP/IPV4/IPV6/PRIV/IFACE toggles and the
+	// live/paused flag, and at 100 columns those alone leave no room for the
+	// filter status this test is actually about — see
+	// TestFilterHeaderTruncatesALongFilter, which widens for the same reason.
+	m := newLiveModel()
+	m.width = 150
+	m = pressAll(t, m, "/", "s", "s", "h")
 
 	// While typing, the footer is the input: the key hints it displaces are
 	// the ones that do nothing until the edit is over.

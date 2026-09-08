@@ -161,6 +161,53 @@ func filterProto(rows []aggregate.Row, showTCP, showUDP bool) []aggregate.Row {
 	return out
 }
 
+// filterIPFamily keeps rows whose remote address family is currently shown,
+// dropping IPv4 rows when showIPv4 is false and IPv6 rows when showIPv6 is
+// false. A row whose remote address does not parse is never hidden, the
+// same "unclassified rows are never hidden" rule filterProto/filterIface
+// apply.
+func filterIPFamily(rows []aggregate.Row, showIPv4, showIPv6 bool) []aggregate.Row {
+	if showIPv4 && showIPv6 {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		ip := net.ParseIP(r.RemoteAddr)
+		switch {
+		case ip == nil:
+			out = append(out, r)
+		case ip.To4() != nil:
+			if showIPv4 {
+				out = append(out, r)
+			}
+		default:
+			if showIPv6 {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
+
+// filterPrivate keeps every row when show is true; otherwise it drops rows
+// whose remote address is RFC1918/RFC4193 private, via net.IP.IsPrivate. A
+// row whose remote address does not parse is never hidden, the same
+// convention filterIPFamily/filterProto/filterIface apply.
+func filterPrivate(rows []aggregate.Row, show bool) []aggregate.Row {
+	if show {
+		return rows
+	}
+
+	out := rows[:0]
+	for _, r := range rows {
+		if ip := net.ParseIP(r.RemoteAddr); ip == nil || !ip.IsPrivate() {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // filterIface keeps rows whose capture interface is currently active in
 // active. A row with no interface yet (Iface == "", no traffic seen for this
 // connection) is never hidden, the same "unclassified rows are never

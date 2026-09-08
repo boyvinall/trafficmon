@@ -22,6 +22,9 @@ type KeyMap struct {
 	ToggleListening key.Binding
 	ToggleTCP       key.Binding
 	ToggleUDP       key.Binding
+	ToggleIPv4      key.Binding
+	ToggleIPv6      key.Binding
+	TogglePrivate   key.Binding
 	Interfaces      key.Binding
 	Pause           key.Binding
 	Help            key.Binding
@@ -44,6 +47,9 @@ func DefaultKeyMap() KeyMap {
 		ToggleListening: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "toggle listening")),
 		ToggleTCP:       key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle tcp")),
 		ToggleUDP:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "toggle udp")),
+		ToggleIPv4:      key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "toggle ipv4")),
+		ToggleIPv6:      key.NewBinding(key.WithKeys("6"), key.WithHelp("6", "toggle ipv6")),
+		TogglePrivate:   key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "toggle private")),
 		Interfaces:      key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "toggle interfaces")),
 		Pause:           key.NewBinding(key.WithKeys("p", " "), key.WithHelp("p/space", "pause")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
@@ -66,7 +72,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.Grouping, k.Sort, k.RateSort, k.Filter, k.ToggleListening, k.ToggleTCP, k.ToggleUDP, k.Interfaces},
-		{k.Pause, k.Help, k.Quit},
+		{k.Filter, k.ToggleListening, k.ToggleTCP, k.ToggleUDP, k.ToggleIPv4, k.ToggleIPv6, k.TogglePrivate, k.Interfaces},
+		{k.Grouping, k.Sort, k.RateSort, k.Pause, k.Help, k.Quit},
 	}
 }

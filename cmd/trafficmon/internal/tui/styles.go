@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/lipgloss"
+)
 
 // colorBorder and colorTitle anchor the theme: every style below is expressed
 // in terms of them (or the semantic OK/fail colors) rather than a bare ANSI
@@ -55,5 +58,27 @@ func DefaultStyles() Styles {
 		ColumnHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true),
 		PanelTitle:   lipgloss.NewStyle().Bold(true).Foreground(colorTitle),
 		Paused:       lipgloss.NewStyle().Bold(true).Foreground(colorFail),
+	}
+}
+
+// HelpStyles returns the key/description colors for the footer hint line and
+// the `?` overlay. bubbles/help's own defaults are tuned for a dense
+// single-line footer coexisting with a lot of other on-screen text — its
+// description color on a dark terminal is close enough to black to be
+// nearly unreadable in the far roomier `?` overlay — so this reuses the
+// theme's own colors instead of the package default.
+func HelpStyles() help.Styles {
+	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(colorTitle)
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	return help.Styles{
+		ShortKey:       keyStyle,
+		ShortDesc:      descStyle,
+		ShortSeparator: sepStyle,
+		Ellipsis:       sepStyle,
+		FullKey:        keyStyle,
+		FullDesc:       descStyle,
+		FullSeparator:  sepStyle,
 	}
 }

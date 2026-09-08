@@ -159,6 +159,17 @@ type Model struct {
 	// same reason showListening does, and are just as much a no-op on a
 	// grouped view: only the ungrouped view ever sets Row.Proto.
 	showTCP, showUDP bool
+	// showIPv4 and showIPv6 say whether rows whose remote address is of each
+	// family are shown, toggled independently by `4` and `6`. Both start
+	// true for the same reason showListening does; a row whose remote
+	// address does not parse as an IP at all is unaffected by either, the
+	// same "unclassified rows are never hidden" rule showTCP/showUDP follow.
+	showIPv4, showIPv6 bool
+	// showPrivate says whether rows whose remote address is RFC1918/RFC4193
+	// private are shown, toggled by `P`. It starts true for the same reason
+	// showListening does, and is a no-op on a row whose remote address does
+	// not parse.
+	showPrivate bool
 
 	width, height int
 }
@@ -182,6 +193,9 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 		active[name] = true
 	}
 
+	helpModel := help.New()
+	helpModel.Styles = HelpStyles()
+
 	return Model{
 		agg:              agg,
 		resolver:         res,
@@ -191,11 +205,14 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 		activeInterfaces: active,
 		keys:             DefaultKeyMap(),
 		styles:           DefaultStyles(),
-		help:             help.New(),
+		help:             helpModel,
 		input:            input,
 		showListening:    true,
 		showTCP:          true,
 		showUDP:          true,
+		showIPv4:         true,
+		showIPv6:         true,
+		showPrivate:      true,
 		sort:             SortPID,
 	}
 }
@@ -353,6 +370,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleTCP()
 	case key.Matches(msg, m.keys.ToggleUDP):
 		m.toggleUDP()
+	case key.Matches(msg, m.keys.ToggleIPv4):
+		m.toggleIPv4()
+	case key.Matches(msg, m.keys.ToggleIPv6):
+		m.toggleIPv6()
+	case key.Matches(msg, m.keys.TogglePrivate):
+		m.togglePrivate()
 
 	case key.Matches(msg, m.keys.Pause):
 		m.paused = !m.paused
@@ -546,6 +569,27 @@ func (m *Model) toggleUDP() {
 	m.rebuild()
 }
 
+// toggleIPv4 flips whether IPv4 rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleIPv4() {
+	m.showIPv4 = !m.showIPv4
+	m.rebuild()
+}
+
+// toggleIPv6 flips whether IPv6 rows are shown, the same way toggleListening
+// flips LISTEN rows.
+func (m *Model) toggleIPv6() {
+	m.showIPv6 = !m.showIPv6
+	m.rebuild()
+}
+
+// togglePrivate flips whether rows with a private remote address are shown,
+// the same way toggleListening flips LISTEN rows.
+func (m *Model) togglePrivate() {
+	m.showPrivate = !m.showPrivate
+	m.rebuild()
+}
+
 // refresh pulls a fresh snapshot from the aggregator and rebuilds the table
 // from it.
 func (m *Model) refresh(now time.Time) {
@@ -575,6 +619,8 @@ func (m *Model) rebuild() {
 	rows := aggregate.Rows(m.snap, m.grouping)
 	rows = filterListening(rows, m.showListening)
 	rows = filterProto(rows, m.showTCP, m.showUDP)
+	rows = filterIPFamily(rows, m.showIPv4, m.showIPv6)
+	rows = filterPrivate(rows, m.showPrivate)
 	rows = filterIface(rows, m.activeInterfaces)
 	rows = filterRows(rows, m.filter, m.resolveHostname)
 	sortRows(rows, m.sort)
@@ -709,6 +755,9 @@ func (m Model) viewHeader() string {
 		onOff(m.showListening, "LISTEN", "!LISTEN"),
 		onOff(m.showTCP, "TCP", "!TCP"),
 		onOff(m.showUDP, "UDP", "!UDP"),
+		onOff(m.showIPv4, "IPV4", "!IPV4"),
+		onOff(m.showIPv6, "IPV6", "!IPV6"),
+		onOff(m.showPrivate, "PRIV", "!PRIV"),
 		onOff(m.allInterfacesActive(), "IFACE", "!IFACE"),
 		onOff(!m.paused, "live", "PAUSED"),
 	}, " · ")
