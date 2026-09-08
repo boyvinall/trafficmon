@@ -22,6 +22,7 @@ type KeyMap struct {
 	ToggleListening key.Binding
 	ToggleTCP       key.Binding
 	ToggleUDP       key.Binding
+	Interfaces      key.Binding
 	Pause           key.Binding
 	Help            key.Binding
 	Quit            key.Binding
@@ -43,6 +44,7 @@ func DefaultKeyMap() KeyMap {
 		ToggleListening: key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "toggle listening")),
 		ToggleTCP:       key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle tcp")),
 		ToggleUDP:       key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "toggle udp")),
+		Interfaces:      key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "toggle interfaces")),
 		Pause:           key.NewBinding(key.WithKeys("p", " "), key.WithHelp("p/space", "pause")),
 		Help:            key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:            key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
@@ -51,7 +53,7 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp implements help.KeyMap.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Grouping, k.Sort, k.Help, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Grouping, k.Sort, k.Interfaces, k.Help, k.Quit}
 }
 
 // FullHelp implements help.KeyMap. Each inner slice is one column of the `?`
@@ -64,7 +66,7 @@ func (k KeyMap) ShortHelp() []key.Binding {
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Home, k.End},
-		{k.Grouping, k.Sort, k.RateSort, k.Filter, k.ToggleListening, k.ToggleTCP, k.ToggleUDP},
+		{k.Grouping, k.Sort, k.RateSort, k.Filter, k.ToggleListening, k.ToggleTCP, k.ToggleUDP, k.Interfaces},
 		{k.Pause, k.Help, k.Quit},
 	}
 }

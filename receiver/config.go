@@ -12,12 +12,10 @@ type Config struct {
 	// (capture + procinfo) for a fresh aggregate.Snapshot.
 	CollectionInterval time.Duration `mapstructure:"collection_interval"`
 
-	// Interface is the network interface to capture on. Empty auto-detects
-	// from the default route, the same as cmd/trafficmon.
+	// Interface is the interface spec to capture on — see
+	// capture.ResolveInterfaces. Empty is treated as capture.Any, same as
+	// cmd/trafficmon's default.
 	Interface string `mapstructure:"interface"`
-
-	// IncludeLoopback also captures loopback traffic.
-	IncludeLoopback bool `mapstructure:"include_loopback"`
 
 	// MaxPeerCardinality caps the number of distinct (remote address, port)
 	// attribute combinations emitted per collection interval. Raw per-flow

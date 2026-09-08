@@ -44,6 +44,22 @@ func testReceiver() *trafficmonReceiver {
 	return &trafficmonReceiver{cfg: NewDefaultConfig(), logger: zap.NewNop()}
 }
 
+// TestStartResolvesEmptyInterfaceAsAny asserts Start treats an empty
+// Config.Interface as capture.Any (ResolveInterfaces itself needs no root
+// or live pcap handle to expand it), rather than failing config resolution
+// up front. Start returns once the engine's goroutines are launched, before
+// any of them need an actual privileged pcap handle to succeed.
+func TestStartResolvesEmptyInterfaceAsAny(t *testing.T) {
+	r := testReceiver()
+
+	if err := r.Start(context.Background(), nil); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if err := r.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v, want nil", err)
+	}
+}
+
 // TestForwardLogsReturnsImmediatelyWhenDisabled asserts forwardLogs bails
 // out as soon as the source reports its log feed isn't enabled, the same
 // path Start takes when no logs consumer is configured — it never reaches

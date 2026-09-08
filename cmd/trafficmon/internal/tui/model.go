@@ -89,7 +89,17 @@ type Model struct {
 	// theoretical.
 	ctx context.Context
 
-	iface  string
+	// interfaces is every interface capture was told about at startup, in the
+	// order the picker lists them. activeInterfaces says which of them are
+	// currently shown, all true until `i` narrows them — a display filter
+	// over rows capture already produced, never a capture restart.
+	interfaces       []string
+	activeInterfaces map[string]bool
+	// showIfacePicker and ifaceCursor are the interface picker's own state,
+	// the same shape showHelp/cursor take for the help overlay and table.
+	showIfacePicker bool
+	ifaceCursor     int
+
 	keys   KeyMap
 	styles Styles
 	// help renders both the footer hint line and the `?` overlay from keys,
@@ -156,7 +166,7 @@ type Model struct {
 // NewModel builds the root model. ctx bounds the reverse-DNS lookups the view
 // starts; res and hostnameCache may each be nil, in which case the hostname
 // sources they provide are simply skipped.
-func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, hostnameCache *dpi.HostnameCache, iface string) Model {
+func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver, hostnameCache *dpi.HostnameCache, interfaces []string) Model {
 	input := textinput.New()
 	input.Prompt = filterPrompt
 
@@ -167,20 +177,26 @@ func NewModel(ctx context.Context, agg *aggregate.Aggregator, res *dns.Resolver,
 	// at a time and the prompt already says where the keyboard is pointing.
 	input.Cursor.SetMode(cursor.CursorStatic)
 
+	active := make(map[string]bool, len(interfaces))
+	for _, name := range interfaces {
+		active[name] = true
+	}
+
 	return Model{
-		agg:           agg,
-		resolver:      res,
-		hostnameCache: hostnameCache,
-		ctx:           ctx,
-		iface:         iface,
-		keys:          DefaultKeyMap(),
-		styles:        DefaultStyles(),
-		help:          help.New(),
-		input:         input,
-		showListening: true,
-		showTCP:       true,
-		showUDP:       true,
-		sort:          SortPID,
+		agg:              agg,
+		resolver:         res,
+		hostnameCache:    hostnameCache,
+		ctx:              ctx,
+		interfaces:       interfaces,
+		activeInterfaces: active,
+		keys:             DefaultKeyMap(),
+		styles:           DefaultStyles(),
+		help:             help.New(),
+		input:            input,
+		showListening:    true,
+		showTCP:          true,
+		showUDP:          true,
+		sort:             SortPID,
 	}
 }
 
@@ -293,6 +309,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// The interface picker claims the keyboard the same way, for the same
+	// reason: everything underneath it is out of sight, so only leaving the
+	// program, closing the picker, or acting on the picker itself make sense.
+	if m.showIfacePicker {
+		return m.handleIfacePickerKey(msg)
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -335,6 +358,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.paused = !m.paused
 	case key.Matches(msg, m.keys.Help):
 		m.showHelp = !m.showHelp
+	case key.Matches(msg, m.keys.Interfaces):
+		m.showIfacePicker = !m.showIfacePicker
+	}
+	return m, nil
+}
+
+// handleIfacePickerKey applies one keypress while the interface picker has
+// the screen: Up/Down move the highlighted interface, space/enter flip it,
+// and everything else that isn't leaving the program or closing the picker
+// is ignored, the same claim on the keyboard the help overlay makes above.
+func (m Model) handleIfacePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, m.keys.Interfaces), msg.Type == tea.KeyEsc:
+		m.showIfacePicker = false
+	case key.Matches(msg, m.keys.Up):
+		m.moveIfaceCursor(-1)
+	case key.Matches(msg, m.keys.Down):
+		m.moveIfaceCursor(1)
+	case msg.Type == tea.KeySpace, msg.Type == tea.KeyEnter:
+		m.toggleActiveInterface()
 	}
 	return m, nil
 }
@@ -431,6 +476,28 @@ func (m *Model) moveCursor(delta int) {
 	m.cursor = clamp(m.cursor+delta, 0, len(m.rows)-1)
 }
 
+// moveIfaceCursor moves the interface picker's highlighted row by delta,
+// clamping at both ends the same way moveCursor does for the table.
+func (m *Model) moveIfaceCursor(delta int) {
+	if len(m.interfaces) == 0 {
+		m.ifaceCursor = 0
+		return
+	}
+	m.ifaceCursor = clamp(m.ifaceCursor+delta, 0, len(m.interfaces)-1)
+}
+
+// toggleActiveInterface flips whether the highlighted interface's rows are
+// shown, redrawing immediately rather than waiting for the next tick — the
+// same immediacy toggleListening/toggleTCP/toggleUDP already have.
+func (m *Model) toggleActiveInterface() {
+	if m.ifaceCursor < 0 || m.ifaceCursor >= len(m.interfaces) {
+		return
+	}
+	name := m.interfaces[m.ifaceCursor]
+	m.activeInterfaces[name] = !m.activeInterfaces[name]
+	m.rebuild()
+}
+
 // pageSize is how far PgUp/PgDn move the cursor: one screenful, so that paging
 // lines up with what the user can actually see. Until the first
 // tea.WindowSizeMsg arrives there is no screenful to measure, so it falls back
@@ -508,6 +575,7 @@ func (m *Model) rebuild() {
 	rows := aggregate.Rows(m.snap, m.grouping)
 	rows = filterListening(rows, m.showListening)
 	rows = filterProto(rows, m.showTCP, m.showUDP)
+	rows = filterIface(rows, m.activeInterfaces)
 	rows = filterRows(rows, m.filter, m.resolveHostname)
 	sortRows(rows, m.sort)
 	m.setRows(rows)
@@ -571,9 +639,12 @@ func clamp(v, lo, hi int) int {
 // taller than the terminal.
 func (m Model) View() string {
 	body := []string{m.viewHeader()}
-	if m.showHelp {
+	switch {
+	case m.showHelp:
 		body = append(body, m.viewHelp()...)
-	} else {
+	case m.showIfacePicker:
+		body = append(body, m.viewIfacePicker()...)
+	default:
 		body = append(body, m.viewTable()...)
 	}
 
@@ -606,7 +677,7 @@ func (m Model) View() string {
 }
 
 // viewHeader renders the title bar: the current grouping on the left, the
-// capture interface and status pushed out to the right.
+// sort/filter status and the toggle badges pushed out to the right.
 func (m Model) viewHeader() string {
 	// The header style already pads a cell either side, so the segments hung
 	// off it must not add a leading space of their own.
@@ -620,7 +691,7 @@ func (m Model) viewHeader() string {
 	// and a stronger one: rows silently absent from the table look exactly
 	// like traffic that stopped, and unlike the sort there is no mark
 	// anywhere else on the screen to give it away.
-	label := "sort: " + m.sort.String() + " · " + m.iface
+	label := "sort: " + m.sort.String()
 	if m.filter != "" {
 		label = "filter: " + truncate(m.filter, maxFilterLabel) + " · " + label
 	}
@@ -638,10 +709,23 @@ func (m Model) viewHeader() string {
 		onOff(m.showListening, "LISTEN", "!LISTEN"),
 		onOff(m.showTCP, "TCP", "!TCP"),
 		onOff(m.showUDP, "UDP", "!UDP"),
+		onOff(m.allInterfacesActive(), "IFACE", "!IFACE"),
 		onOff(!m.paused, "live", "PAUSED"),
 	}, " · ")
 
 	return joinEnds(left, right, m.contentWidth())
+}
+
+// allInterfacesActive reports whether every known interface is currently
+// shown, mirroring the LISTEN/TCP/UDP toggles' convention that true is the
+// unfiltered state.
+func (m Model) allInterfacesActive() bool {
+	for _, name := range m.interfaces {
+		if !m.activeInterfaces[name] {
+			return false
+		}
+	}
+	return true
 }
 
 // viewTable renders the column titles and as many rows as fit, keeping the
@@ -693,6 +777,27 @@ func (m Model) viewHelp() []string {
 	lines := make([]string, 0, 2+len(helpLines))
 	lines = append(lines, m.styles.ColumnHeader.Render("Key reference"), "")
 	lines = append(lines, helpLines...)
+	return m.fit(lines)
+}
+
+// viewIfacePicker renders the interface checklist in place of the table: one
+// checkbox line per interface capture was started with, the highlighted one
+// styled the same way the table's own selected row is.
+func (m Model) viewIfacePicker() []string {
+	lines := make([]string, 0, 2+len(m.interfaces))
+	lines = append(lines, m.styles.ColumnHeader.Render("Interfaces"), "")
+
+	for i, name := range m.interfaces {
+		mark := "[ ]"
+		if m.activeInterfaces[name] {
+			mark = "[x]"
+		}
+		line := pad(mark+" "+name, m.contentWidth(), alignLeft, false)
+		if i == m.ifaceCursor {
+			line = m.styles.Selected.Render(line)
+		}
+		lines = append(lines, line)
+	}
 	return m.fit(lines)
 }
 

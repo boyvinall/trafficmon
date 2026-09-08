@@ -21,6 +21,11 @@ var runRoute = func(ctx context.Context) ([]byte, error) {
 	return exec.CommandContext(ctx, "route", "-n", "get", "default").Output()
 }
 
+// runRoute6 mirrors runRoute for the IPv6 default route.
+var runRoute6 = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "route", "-n", "get", "-inet6", "default").Output()
+}
+
 // parseRouteInterface pulls the device name out of `route -n get default`
 // output, which reports it on an indented "interface: en0" line.
 func parseRouteInterface(out string) (string, error) {

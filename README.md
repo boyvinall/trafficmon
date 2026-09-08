@@ -41,8 +41,7 @@ on macOS, `/proc` on Linux).
 
 | Flag | Description |
 |------|-------------|
-| `-i`, `--iface` | Interface to capture on (default: the one backing the default route) |
-| `--include-loopback` | Also capture loopback traffic |
+| `-i`, `--iface` | Capture on these interfaces: comma-separated device names, or `any`/`default`/`localhost` (default `any`) |
 | `-l`, `--level` | Log level: `debug`, `info`, `warn`, `error` |
 
 ## Keys

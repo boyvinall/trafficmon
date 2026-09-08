@@ -161,6 +161,20 @@ func filterProto(rows []aggregate.Row, showTCP, showUDP bool) []aggregate.Row {
 	return out
 }
 
+// filterIface keeps rows whose capture interface is currently active in
+// active. A row with no interface yet (Iface == "", no traffic seen for this
+// connection) is never hidden, the same "unclassified rows are never
+// hidden" rule filterProto applies to icmp/arp/grouped rows.
+func filterIface(rows []aggregate.Row, active map[string]bool) []aggregate.Row {
+	out := rows[:0]
+	for _, r := range rows {
+		if r.Iface == "" || active[r.Iface] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // alignment is which side of its cell a column's text sits on.
 type alignment uint8
 
@@ -182,13 +196,15 @@ const (
 //
 // The hostname goes first of all, because it is the only column that annotates
 // another one rather than carrying anything of its own: the address it names
-// is still on screen without it. STATE goes next, then PROTO, then AGE, then
-// CONN, then PID. AGE drops ahead of CONN and PID because it is purely
+// is still on screen without it. IFACE goes next — a genuinely new fact, but
+// still supplementary the way HOSTNAME is — then STATE, then PROTO, then AGE,
+// then CONN, then PID. AGE drops ahead of CONN and PID because it is purely
 // supplementary — unlike CONN and PID it names nothing about the row's
-// identity — but it is kept longer than HOSTNAME/STATE/PROTO since it applies
-// to every grouping alike.
+// identity — but it is kept longer than HOSTNAME/IFACE/STATE/PROTO since it
+// applies to every grouping alike.
 const (
 	prioHostname = iota
+	prioIface
 	prioState
 	prioProto
 	prioAge
@@ -309,7 +325,7 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now
 		if hostname != nil {
 			cols = append(cols, hostnameColumn(hostname))
 		}
-		cols = append(cols, pidColumn(), connColumn())
+		cols = append(cols, ifaceColumn(), pidColumn(), connColumn())
 	case aggregate.GroupByProcessName:
 		// A process name can span several PIDs and local addresses, so
 		// nothing but the label, the remote endpoint and the connection
@@ -318,7 +334,7 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now
 		if hostname != nil {
 			cols = append(cols, hostnameColumn(hostname))
 		}
-		cols = append(cols, connColumn())
+		cols = append(cols, ifaceColumn(), connColumn())
 	default: // aggregate.GroupNone
 		cols = append(cols,
 			localColumn(func(r aggregate.Row) string {
@@ -336,6 +352,7 @@ func tableColumns(g aggregate.Grouping, hostname func(aggregate.Row) string, now
 		}
 
 		cols = append(cols,
+			ifaceColumn(),
 			column{
 				title: "PROTO",
 				width: protoWidth,
@@ -429,6 +446,16 @@ func remoteColumn() column {
 // constant, and on a wide terminal both should grow.
 func hostnameColumn(hostname func(aggregate.Row) string) column {
 	return column{title: "HOSTNAME", align: alignLeft, prio: prioHostname, flex: true, cell: hostname}
+}
+
+// ifaceColumn builds the IFACE column. Unlike PROTO/STATE, Row.Iface is
+// carried through every grouping (see aggregate's rows.go), so this column
+// is shared by all three, the same as REMOTE. It is flexible rather than a
+// fixed width: short on Darwin/Linux ("en0", "eth0") but a raw libpcap NPF
+// device path on Windows ("\Device\NPF_{GUID...}"), and nothing in this
+// codebase resolves that to a friendlier adapter name.
+func ifaceColumn() column {
+	return column{title: "IFACE", align: alignLeft, prio: prioIface, flex: true, cell: func(r aggregate.Row) string { return r.Iface }}
 }
 
 // pidColumn builds the PID column, shared by the ungrouped and by-PID views —

@@ -39,11 +39,7 @@ func main() {
 			&cli.StringFlag{
 				Name:    "iface",
 				Aliases: []string{"i"},
-				Usage:   "interface to capture on (default: the one backing the default route)",
-			},
-			&cli.BoolFlag{
-				Name:  "include-loopback",
-				Usage: "also capture loopback traffic",
+				Usage:   `capture on these interfaces: comma-separated device names, or "any"/"default"/"localhost" (default "any")`,
 			},
 		},
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
@@ -83,23 +79,22 @@ func run(ctx context.Context, cmd *cli.Command) error {
 
 	// Forces any pcap-open failure (most notably a missing libpcap on Linux)
 	// to surface here and exit cleanly, rather than racing the TUI goroutine
-	// that would otherwise be the first thing to open a handle.
+	// that would otherwise be the first thing to open a handle. Kept
+	// unconditional (not folded into ResolveInterfaces below) because a
+	// literal --iface value never itself touches libpcap to resolve.
 	if _, err := capture.ListInterfaces(); err != nil {
 		return fmt.Errorf("libpcap: %w", err)
 	}
 
-	iface := cmd.String("iface")
-	if iface == "" {
-		var err error
-		if iface, err = capture.DefaultInterface(); err != nil { //nolint:contextcheck // DefaultInterface deliberately owns its own short, fixed timeout rather than ctx's
-			return fmt.Errorf("detect interface: %w", err)
-		}
+	spec := cmd.String("iface")
+	ifaces, err := capture.ResolveInterfaces(spec) //nolint:contextcheck // ResolveInterfaces deliberately owns its own short, fixed timeout rather than ctx's
+	if err != nil {
+		return fmt.Errorf("resolve interfaces %q: %w", spec, err)
 	}
-	slog.Info("starting capture", "iface", iface)
+	slog.Info("starting capture", "ifaces", ifaces)
 
 	cfg := capture.DefaultConfig()
-	cfg.Interface = iface
-	cfg.IncludeLoopback = cmd.Bool("include-loopback")
+	cfg.Interface = spec
 
 	capturer := capture.New(cfg)
 	source := procinfo.NewBestSource()
@@ -117,7 +112,7 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	g.Go(func() error { return source.Run(ctx) })
 	g.Go(func() error {
 		defer stop()
-		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), iface), tea.WithAltScreen(), tea.WithContext(ctx))
+		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), ifaces), tea.WithAltScreen(), tea.WithContext(ctx))
 		_, err := p.Run()
 		return err
 	})

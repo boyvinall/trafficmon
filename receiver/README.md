@@ -18,16 +18,17 @@ SYNs (connection attempts).
 ```yaml
 trafficmon:
   collection_interval: <duration> # default = 1s
-  interface: <string>             # default = auto-detect from the default route
-  include_loopback: <bool>        # default = false
+  interface: <string>             # default = any
   max_peer_cardinality: <int>     # default = 1000
 ```
 
 - `collection_interval`: how often the receiver polls the engine (capture +
   procinfo) for a fresh snapshot and emits it as metrics/logs.
-- `interface`: the network interface to capture on. Empty auto-detects the
-  interface backing the default route, the same as `cmd/trafficmon`.
-- `include_loopback`: also captures loopback traffic.
+- `interface`: the interface spec to capture on — a comma-separated list of
+  literal device names and/or keywords, freely mixed: `any` (every
+  interface, and the default when empty), `default` (every interface
+  currently backing a default route), and `localhost`/`local`/`loopback`
+  (the loopback interface). For example, `eth0,loopback`.
 - `max_peer_cardinality`: see [Cardinality](#cardinality) below.
 
 Capturing packets and reading other processes' socket info both need root,

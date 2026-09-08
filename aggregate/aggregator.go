@@ -209,6 +209,11 @@ type Row struct {
 	// has no such single answer once more than one connection is involved.
 	Hostname string
 
+	// Iface is the interface capture last saw this row's connection's
+	// traffic on, or "" once capture hasn't yet — the same first-seen
+	// representative-value trade LocalAddr and Hostname above make.
+	Iface string
+
 	BytesInTotal  uint64
 	BytesOutTotal uint64
 	RateInBps     float64

@@ -19,6 +19,11 @@ var runRoute = func(ctx context.Context) ([]byte, error) {
 	return exec.CommandContext(ctx, "ip", "-4", "route", "show", "default").Output()
 }
 
+// runRoute6 mirrors runRoute for the IPv6 default route.
+var runRoute6 = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "ip", "-6", "route", "show", "default").Output()
+}
+
 // parseRouteInterface pulls the device name out of `ip -4 route show
 // default` output, e.g. "default via 192.168.1.1 dev eth0 proto dhcp metric
 // 100". Multiple default routes are listed lowest-metric (most preferred)

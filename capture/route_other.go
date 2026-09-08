@@ -18,8 +18,8 @@ var isLoopbackInterface = func(name string) bool {
 }
 
 // loopbackDeviceName returns the libpcap device name backing the loopback
-// interface, for opening a second capture handle when IncludeLoopback is
-// set; see route_windows.go for the Windows override, where the libpcap
+// interface, for ResolveInterfaces to expand "localhost"/"local"/"loopback"
+// into; see route_windows.go for the Windows override, where the libpcap
 // device name isn't a constant and must be discovered by enumeration.
 var loopbackDeviceName = func() (string, error) {
 	return loopbackInterface, nil

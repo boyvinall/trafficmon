@@ -26,7 +26,7 @@ func TestViewHeader(t *testing.T) {
 		{
 			name:     "ungrouped by default",
 			setup:    func(*Model) {},
-			contains: []string{appName, "Ungrouped", "en0", "live"},
+			contains: []string{appName, "Ungrouped", "live"},
 			omits:    []string{"PAUSED"},
 		},
 		{
@@ -173,10 +173,10 @@ func TestClosedRowsRenderDimmed(t *testing.T) {
 	withANSI(t)
 
 	// processRows is grouped-by-PID-shaped data (PID and Connections, no
-	// local/remote address). GroupByPID now also carries REMOTE, HOSTNAME and
-	// AGE, so the terminal has to be wide enough to leave PROCESS the room
-	// for the full label to survive untruncated.
-	m := newTestModel(processRows(), 159, 12)
+	// local/remote address). GroupByPID now also carries REMOTE, HOSTNAME,
+	// IFACE and AGE, so the terminal has to be wide enough to leave PROCESS
+	// the room for the full label to survive untruncated.
+	m := newTestModel(processRows(), 230, 12)
 	m.grouping = aggregate.GroupByPID
 
 	// Keep the cursor off both rows under test: the selected style would
@@ -724,9 +724,9 @@ func TestUpdateHonoursEveryAdvertisedBinding(t *testing.T) {
 // modelState is everything a keypress can observably change, rendered so that
 // a test can tell "the model reacted" from "the model did not".
 func modelState(m Model, cmd tea.Cmd) string {
-	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t quit=%t",
+	return fmt.Sprintf("grouping=%d sort=%s cursor=%d rows=%v paused=%t help=%t showIfacePicker=%t filter=%q filtering=%t showListening=%t showTCP=%t showUDP=%t quit=%t",
 		m.grouping, m.sort, m.cursor,
-		rowLabels(m), m.paused, m.showHelp, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, cmd != nil)
+		rowLabels(m), m.paused, m.showHelp, m.showIfacePicker, m.filter, m.filtering, m.showListening, m.showTCP, m.showUDP, cmd != nil)
 }
 
 // rowLabels is the labels of the rows on screen, in order.
@@ -831,7 +831,7 @@ func TestStateColumnHiddenWhenGrouped(t *testing.T) {
 	// GroupByPID and GroupByProcessName both roll up per remote endpoint, so
 	// REMOTE and HOSTNAME still mean something and must appear; STATE does
 	// not, since a grouped row can roll up more than one connection's state.
-	m := newTestModel(processRows(), 124, 12)
+	m := newTestModel(processRows(), 140, 12)
 	m.grouping = aggregate.GroupByPID
 
 	got := m.View()
@@ -1079,6 +1079,136 @@ func TestHelpOverlayIgnoresEverythingElse(t *testing.T) {
 				t.Errorf("%q changed the model while help was open:\n%s\nwant:\n%s", tc.key, got, before)
 			}
 		})
+	}
+}
+
+func TestIfacePickerOpensAndClosesWithIOrEsc(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "same key toggles it off", key: "i"},
+		{name: "esc also dismisses it", key: "esc"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := press(t, newLiveModel(), "i")
+			if !m.showIfacePicker {
+				t.Fatalf("i did not open the interface picker")
+			}
+
+			m, _ = press(t, m, tc.key)
+			if m.showIfacePicker {
+				t.Errorf("%q did not close the interface picker", tc.key)
+			}
+		})
+	}
+}
+
+// TestIfacePickerIgnoresEverythingElse checks that keys which normally
+// change the model are no-ops while the picker is showing: everything
+// underneath it is out of sight, so acting on it would change a view the
+// user cannot see. Up/Down are deliberately not included here — unlike the
+// help overlay, the picker has its own cursor for them to move.
+func TestIfacePickerIgnoresEverythingElse(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "pause", key: "p"},
+		{name: "grouping", key: "g"},
+		{name: "sort", key: "s"},
+		{name: "filter", key: "/"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := press(t, newLiveModel(), "i")
+			if !m.showIfacePicker {
+				t.Fatalf("i did not open the interface picker")
+			}
+			before := modelState(m, nil)
+
+			m, cmd := press(t, m, tc.key)
+
+			if !m.showIfacePicker {
+				t.Errorf("%q closed the interface picker, want it to stay open", tc.key)
+			}
+			if got := modelState(m, cmd); got != before {
+				t.Errorf("%q changed the model while the interface picker was open:\n%s\nwant:\n%s", tc.key, got, before)
+			}
+		})
+	}
+}
+
+func TestIfacePickerTogglesAnInterfaceAndFiltersRows(t *testing.T) {
+	snap := aggregate.Snapshot{
+		At: testNow,
+		Connections: []aggregate.ConnectionRecord{
+			{PID: 412, ProcessName: "curl", RemoteAddr: "1.2.3.4", RemotePort: 443, Proto: "tcp", Iface: "en0", LastSeen: testNow},
+			{PID: 22, ProcessName: "sshd", RemoteAddr: "5.6.7.8", RemotePort: 22, Proto: "tcp", Iface: "en1", LastSeen: testNow},
+		},
+	}
+
+	m := newTestModelIfaces(nil, 100, 12, []string{"en0", "en1"})
+	m.snap = snap
+	m.rebuild()
+
+	if got := rowLabels(m); len(got) != 2 {
+		t.Fatalf("rows = %v, want both interfaces' rows before toggling", got)
+	}
+
+	m, _ = press(t, m, "i")
+	if !m.showIfacePicker {
+		t.Fatalf("i did not open the interface picker")
+	}
+
+	// en1 is the second interface listed.
+	m, _ = press(t, m, "down")
+	m, _ = press(t, m, " ")
+	m, _ = press(t, m, "esc")
+	if m.showIfacePicker {
+		t.Fatalf("esc did not close the interface picker")
+	}
+
+	if got := rowLabels(m); len(got) != 1 || got[0] != "curl" {
+		t.Errorf("rows = %v, want only en0's row once en1 is hidden", got)
+	}
+	if !strings.Contains(m.View(), "!IFACE") {
+		t.Errorf("header does not say an interface is hidden:\n%s", m.View())
+	}
+
+	// Toggle it back on.
+	m, _ = press(t, m, "i")
+	m, _ = press(t, m, " ")
+	m, _ = press(t, m, "i")
+
+	if got := rowLabels(m); len(got) != 2 {
+		t.Errorf("rows = %v, want both restored", got)
+	}
+	if strings.Contains(m.View(), "!IFACE") {
+		t.Errorf("header still says an interface is hidden:\n%s", m.View())
+	}
+}
+
+func TestViewIfacePicker(t *testing.T) {
+	m := newTestModelIfaces(processRows(), 100, 20, []string{"en0", "en1"})
+	m.showIfacePicker = true
+
+	got := m.View()
+	if strings.Contains(got, "com.apple.WebKit.Networking") {
+		t.Errorf("interface picker should replace the table, got:\n%s", got)
+	}
+	for _, want := range []string{"Interfaces", "[x] en0", "[x] en1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("interface picker missing %q:\n%s", want, got)
+		}
+	}
+
+	// The header and footer stay put, so the picker never loses the user.
+	if !strings.Contains(got, "Ungrouped") {
+		t.Errorf("interface picker dropped the header")
 	}
 }
 

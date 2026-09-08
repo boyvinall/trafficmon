@@ -147,6 +147,16 @@ var runRoute = func(_ context.Context) ([]byte, error) {
 	return []byte(strconv.FormatUint(uint64(idx), 10)), nil
 }
 
+// runRoute6 mirrors runRoute for the IPv6 default route.
+var runRoute6 = func(_ context.Context) ([]byte, error) {
+	sa := &windows.SockaddrInet6{Addr: [16]byte{0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88}}
+	var idx uint32
+	if err := windows.GetBestInterfaceEx(sa, &idx); err != nil {
+		return nil, fmt.Errorf("GetBestInterfaceEx: %w", err)
+	}
+	return []byte(strconv.FormatUint(uint64(idx), 10)), nil
+}
+
 // parseRouteInterface resolves the interface index runRoute found into the
 // libpcap NPF device name backing it -- every other caller of DefaultInterface
 // treats its return value as a libpcap device name (ListInterfaces, --iface,

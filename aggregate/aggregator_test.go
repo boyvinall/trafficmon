@@ -537,8 +537,8 @@ func TestRowsByPIDSumsCountersPerProcess(t *testing.T) {
 func TestRowsByPIDMergesConnectionsToTheSameDestination(t *testing.T) {
 	now := time.Now()
 	snap := Snapshot{Connections: []ConnectionRecord{
-		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 1000, LastSeen: now, Hostname: "first.example.com", FirstSeen: now.Add(-time.Hour)},
-		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 2000, LastSeen: now, Hostname: "second.example.com", FirstSeen: now.Add(-2 * time.Hour)},
+		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 1000, LastSeen: now, Hostname: "first.example.com", Iface: "en0", FirstSeen: now.Add(-time.Hour)},
+		{PID: 42, ProcessName: "curl", RemoteAddr: "140.82.112.3", RemotePort: 443, BytesInTotal: 2000, LastSeen: now, Hostname: "second.example.com", Iface: "en1", FirstSeen: now.Add(-2 * time.Hour)},
 	}}
 
 	rows := Rows(snap, GroupByPID)
@@ -553,6 +553,10 @@ func TestRowsByPIDMergesConnectionsToTheSameDestination(t *testing.T) {
 	if got := rows[0].Hostname; got != "first.example.com" {
 		t.Errorf("row.Hostname = %q, want %q (first-seen representative value)", got, "first.example.com")
 	}
+	// Iface makes the same trade as Hostname/LocalAddr above.
+	if got := rows[0].Iface; got != "en0" {
+		t.Errorf("row.Iface = %q, want %q (first-seen representative value)", got, "en0")
+	}
 	// FirstSeen, unlike Hostname, does have a single right answer once
 	// connections are rolled together: the earliest of them.
 	if got := rows[0].FirstSeen; !got.Equal(now.Add(-2 * time.Hour)) {
@@ -563,8 +567,8 @@ func TestRowsByPIDMergesConnectionsToTheSameDestination(t *testing.T) {
 func TestRowsByProcessNameGroupsAcrossPIDs(t *testing.T) {
 	now := time.Now()
 	snap := Snapshot{Connections: []ConnectionRecord{
-		{PID: 100, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 10, LastSeen: now, FirstSeen: now.Add(-2 * time.Hour)},
-		{PID: 200, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 20, LastSeen: now, FirstSeen: now.Add(-time.Hour)},
+		{PID: 100, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 10, LastSeen: now, Iface: "en0", FirstSeen: now.Add(-2 * time.Hour)},
+		{PID: 200, ProcessName: "chrome", RemoteAddr: "1.1.1.1", RemotePort: 443, BytesInTotal: 20, LastSeen: now, Iface: "en1", FirstSeen: now.Add(-time.Hour)},
 	}}
 
 	rows := Rows(snap, GroupByProcessName)
@@ -583,6 +587,11 @@ func TestRowsByProcessNameGroupsAcrossPIDs(t *testing.T) {
 	}
 	if !got.FirstSeen.Equal(now.Add(-2 * time.Hour)) {
 		t.Errorf("row.FirstSeen = %s, want %s (the minimum across the two PIDs)", got.FirstSeen, now.Add(-2*time.Hour))
+	}
+	// Iface makes the same first-seen representative-value trade as
+	// Hostname/LocalAddr.
+	if got.Iface != "en0" {
+		t.Errorf("row.Iface = %q, want %q (first-seen representative value)", got.Iface, "en0")
 	}
 }
 

@@ -86,27 +86,27 @@ func TestTableColumnsByGrouping(t *testing.T) {
 	}{
 		{
 			name: "ungrouped, no hostname", grouping: aggregate.GroupNone,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "IFACE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "ungrouped, with hostname", grouping: aggregate.GroupNone, hostname: stubHostname,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "IFACE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by PID", grouping: aggregate.GroupByPID,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "IFACE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by PID, with hostname", grouping: aggregate.GroupByPID, hostname: stubHostname,
-			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "IFACE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by process name", grouping: aggregate.GroupByProcessName,
-			want: []string{"PROCESS", "REMOTE", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "REMOTE", "IFACE", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 		{
 			name: "by process name, with hostname", grouping: aggregate.GroupByProcessName, hostname: stubHostname,
-			want: []string{"PROCESS", "REMOTE", "HOSTNAME", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			want: []string{"PROCESS", "REMOTE", "HOSTNAME", "IFACE", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 		},
 	}
 
@@ -211,16 +211,24 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 	}{
 		{
 			name: "roomy", width: 120,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 16,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "IFACE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 12,
 		},
 		{
-			name: "age dropped first", width: 105,
+			// IFACE is a flexible column like PROCESS/LOCAL/REMOTE, so it is
+			// the first thing traded away once there is no longer room to
+			// share five ways rather than four.
+			name: "iface dropped first", width: 110,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 12,
+		},
+		{
+			name: "age dropped second", width: 105,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "CONN", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 14,
 		},
 		{
-			name: "connections dropped second", width: 96,
+			name: "connections dropped third", width: 96,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 12,
 		},
@@ -231,7 +239,7 @@ func TestFitColumnsNarrowPolicy(t *testing.T) {
 			// share what PID's own width frees up, so there is a width where
 			// PID alone is gone and the row still fits its own width, before
 			// the essential floor is reached.
-			name: "pid dropped third", width: 89,
+			name: "pid dropped fourth", width: 89,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 13,
 		},
@@ -632,45 +640,45 @@ func TestFitColumnsDropsHostnameThenStateThenPID(t *testing.T) {
 		labelWidth int
 	}{
 		{
-			// The five flexible columns split what the fixed ones leave, so
+			// The six flexible columns split what the fixed ones leave, so
 			// a wide terminal spends its extra cells on all of them.
 			name: "roomy", width: 200,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 28,
-		},
-		{
-			name: "typical", width: 140,
-			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
-			labelWidth: 13,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "HOSTNAME", "IFACE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 23,
 		},
 		{
 			// The hostname goes before everything else, because it is the
 			// only column that annotates another one rather than carrying
 			// anything of its own: the address it names is still on screen
-			// without it.
-			name: "hostname dropped first", width: 129,
+			// without it. IFACE, right behind it in priority, still fits.
+			name: "hostname dropped first", width: 140,
+			want:       []string{"PROCESS", "LOCAL", "REMOTE", "IFACE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
+			labelWidth: 13,
+		},
+		{
+			name: "iface dropped second", width: 129,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "STATE", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 14,
 		},
 		{
-			name: "state dropped second", width: 117,
+			name: "state dropped third", width: 117,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PROTO", "PID", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 15,
 		},
 		{
-			name: "proto dropped third", width: 104,
+			name: "proto dropped fourth", width: 104,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "AGE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 13,
 		},
 		{
 			// AGE drops ahead of PID: unlike PID, it names nothing about the
 			// row's identity, so it is purely supplementary information.
-			name: "age dropped fourth", width: 98,
+			name: "age dropped fifth", width: 98,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "PID", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 14,
 		},
 		{
-			name: "pid dropped fifth", width: 89,
+			name: "pid dropped sixth", width: 89,
 			want:       []string{"PROCESS", "LOCAL", "REMOTE", "↓ RATE", "↑ RATE", "↓ TOTAL", "↑ TOTAL"},
 			labelWidth: 13,
 		},
