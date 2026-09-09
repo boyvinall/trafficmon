@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/urfave/cli/v3"
@@ -40,6 +42,10 @@ func main() {
 				Name:    "iface",
 				Aliases: []string{"i"},
 				Usage:   `capture on these interfaces: comma-separated device names, or "any"/"default"/"localhost" (default "any")`,
+			},
+			&cli.DurationFlag{
+				Name:  "pprof",
+				Usage: "capture a CPU + heap + goroutine profile for this long, writing trafficmon-*.pprof into the working directory; unset disables it",
 			},
 		},
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
@@ -110,6 +116,9 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return capturer.Run(ctx) })
 	g.Go(func() error { return source.Run(ctx) })
+	if d := cmd.Duration("pprof"); d > 0 {
+		g.Go(func() error { return capturePprof(ctx, d) })
+	}
 	g.Go(func() error {
 		defer stop()
 		p := tea.NewProgram(tui.NewModel(ctx, agg, resolver, capturer.HostnameCache(), ifaces), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithMouseCellMotion())
@@ -119,6 +128,50 @@ func run(ctx context.Context, cmd *cli.Command) error {
 
 	if err := g.Wait(); err != nil && !isShutdown(err) {
 		return err
+	}
+	return nil
+}
+
+// capturePprof runs a CPU profile for d (or until ctx is cancelled,
+// whichever comes first), then writes it alongside a heap and goroutine
+// snapshot taken at the end of that window to trafficmon-{cpu,heap,goroutine}.pprof
+// in the working directory, each openable with `go tool pprof`.
+func capturePprof(ctx context.Context, d time.Duration) error {
+	cpu, err := os.Create("trafficmon-cpu.pprof")
+	if err != nil {
+		return fmt.Errorf("create cpu profile: %w", err)
+	}
+	defer func() { _ = cpu.Close() }()
+
+	if err := pprof.StartCPUProfile(cpu); err != nil {
+		return fmt.Errorf("start cpu profile: %w", err)
+	}
+	slog.Info("pprof capture started", "duration", d)
+
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
+	}
+	pprof.StopCPUProfile()
+
+	for _, name := range []string{"heap", "goroutine"} {
+		if err := writeProfile(name); err != nil {
+			return err
+		}
+	}
+
+	slog.Info("pprof capture complete", "files", []string{"trafficmon-cpu.pprof", "trafficmon-heap.pprof", "trafficmon-goroutine.pprof"})
+	return nil
+}
+
+func writeProfile(name string) error {
+	f, err := os.Create("trafficmon-" + name + ".pprof") //nolint:gosec // name is always one of our own two hardcoded profile names, never attacker-controlled
+	if err != nil {
+		return fmt.Errorf("create %s profile: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := pprof.Lookup(name).WriteTo(f, 0); err != nil {
+		return fmt.Errorf("write %s profile: %w", name, err)
 	}
 	return nil
 }
