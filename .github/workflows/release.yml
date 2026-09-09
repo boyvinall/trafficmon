@@ -100,10 +100,8 @@ jobs:
         include:
           - os: ubuntu-latest
             goarch: amd64
-            goreleaser_arch: x86_64
           - os: ubuntu-24.04-arm
             goarch: arm64
-            goreleaser_arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -111,7 +109,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
       - name: Build and package inside Alpine container
-        run: make release-linux-docker GOARCH=${{ matrix.goarch }} GORELEASER_ARCH=${{ matrix.goreleaser_arch }}
+        run: make release-linux-docker LINUX_ARCH=${{ matrix.goarch }}
       - uses: actions/upload-artifact@v4
         with:
           name: trafficmon-linux-${{ matrix.goarch }}
