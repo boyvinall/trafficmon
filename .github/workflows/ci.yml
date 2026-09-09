@@ -137,7 +137,12 @@ jobs:
           distribution: goreleaser
           version: latest
           install-only: true
-      - run: goreleaser build --single-target --clean
+      - name: Build (goreleaser)
+        shell: bash
+        run: |
+          flag=""
+          git describe --tags >/dev/null 2>&1 || flag="--snapshot"
+          goreleaser build --single-target --clean $flag
 
   # Mirrors release.yml's build-linux job: same Alpine container, same
   # statically-linked netgo build via `make release-build-linux`, so CI

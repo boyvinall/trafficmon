@@ -6,6 +6,11 @@ MODULE_DIRS := . cmd/trafficmon receiver cmd/otel-collector
 
 OCB_VERSION := v0.119.0
 
+# goreleaser refuses to build at all without a reachable tag. CI's checkout
+# has no tags (default shallow, non-tag checkout); release.yml's does (tags
+# fetched, checked out at the release tag), so this expands to empty there.
+GORELEASER_SNAPSHOT_FLAG := $(shell git describe --tags >/dev/null 2>&1 || echo --snapshot)
+
 .PHONY: help all build lint test clean run bpf-generate generate-otel-collector build-otel-collector release-build release-build-linux
 
 define PROMPT
@@ -54,12 +59,12 @@ test: generate-otel-collector
 #: cross-build the current platform's release variant via goreleaser (the darwin/windows builds in .goreleaser.yaml); needs goreleaser on PATH
 release-build:
 	$(call PROMPT, $@)
-	goreleaser build --single-target --clean
+	goreleaser build --single-target --clean $(GORELEASER_SNAPSHOT_FLAG)
 
 #: statically-linked linux release variant (netgo + static libpcap) via goreleaser; run inside an Alpine/musl container so the binary carries no glibc symbol-versioning floor -- regenerates eBPF bindings first
 release-build-linux: bpf-generate
 	$(call PROMPT, $@)
-	goreleaser build --single-target --clean --id trafficmon-linux
+	goreleaser build --single-target --clean --id trafficmon-linux $(GORELEASER_SNAPSHOT_FLAG)
 
 #: remove build artifacts
 clean:
