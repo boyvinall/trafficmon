@@ -144,28 +144,22 @@ jobs:
           git describe --tags >/dev/null 2>&1 || flag="--snapshot"
           goreleaser build --single-target --clean $flag
 
-  # Mirrors release.yml's build-linux job: same Alpine container, same
-  # statically-linked netgo build via `make release-build-linux`, so CI
-  # verifies the exact binary a release ships without waiting for a tag.
+  # Mirrors release.yml's build-linux job: same Alpine container (via
+  # compose.yaml's release-linux service), same statically-linked netgo
+  # build via `make release-build-linux`, so CI verifies the exact binary a
+  # release ships without waiting for a tag.
   build-release-linux:
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
+            goarch: amd64
             goreleaser_arch: x86_64
           - os: ubuntu-24.04-arm
+            goarch: arm64
             goreleaser_arch: arm64
     runs-on: ${{ matrix.os }}
-    env:
-      GORELEASER_VERSION: 2.18.1
     steps:
       - uses: actions/checkout@v7
       - name: Build inside Alpine container
-        run: |
-          docker run --rm -v "$PWD:/src" -w /src golang:1.22-alpine sh -c "
-            set -e
-            apk add --no-cache make gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash curl
-            git config --global --add safe.directory /src
-            curl -sL https://github.com/goreleaser/goreleaser/releases/download/v${GORELEASER_VERSION}/goreleaser_Linux_${{ matrix.goreleaser_arch }}.tar.gz | tar xz -C /usr/local/bin goreleaser
-            make release-build-linux
-          "
+        run: make release-linux-docker GOARCH=${{ matrix.goarch }} GORELEASER_ARCH=${{ matrix.goreleaser_arch }}

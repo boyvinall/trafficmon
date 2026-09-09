@@ -1,0 +1,11 @@
+# Build environment for the Linux release binary: static, netgo-tagged, built
+# against musl so it carries no glibc symbol-versioning floor and no
+# libpcap.so runtime dependency, and runs unmodified on any Linux
+# distro/kernel new enough for the syscalls it uses.
+FROM golang:1.22-alpine
+
+RUN apk add --no-cache make gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash jq p7zip curl
+
+WORKDIR /src
+
+ENV GORELEASER_VERSION=2.18.1

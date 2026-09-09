@@ -6,12 +6,17 @@ MODULE_DIRS := . cmd/trafficmon receiver cmd/otel-collector
 
 OCB_VERSION := v0.119.0
 
-# goreleaser refuses to build at all without a reachable tag. CI's checkout
-# has no tags (default shallow, non-tag checkout); release.yml's does (tags
-# fetched, checked out at the release tag), so this expands to empty there.
-GORELEASER_SNAPSHOT_FLAG := $(shell git describe --tags >/dev/null 2>&1 || echo --snapshot)
+# arch selecting which compose.yaml service release-linux-docker runs --
+# release-linux-$(LINUX_ARCH) must exist there. Override on the command line
+# for a different arch, e.g. `make release-linux-docker LINUX_ARCH=arm64`.
+LINUX_ARCH ?= amd64
 
-.PHONY: help all build lint test clean run bpf-generate generate-otel-collector build-otel-collector release-build release-build-linux
+# goreleaser refuses to build at all without a reachable tag. Only
+# release.yml's checkout (running against a tag ref) omits this flag; every
+# other build, including local ones, passes --snapshot.
+GORELEASER_SNAPSHOT_FLAG := $(if $(filter tag,$(GITHUB_REF_TYPE)),,--snapshot)
+
+.PHONY: help all build lint test clean run bpf-generate generate-otel-collector build-otel-collector release-build release-build-linux release-linux-docker
 
 define PROMPT
 	@echo
@@ -66,10 +71,15 @@ release-build-linux: bpf-generate
 	$(call PROMPT, $@)
 	goreleaser build --single-target --clean --id trafficmon-linux $(GORELEASER_SNAPSHOT_FLAG)
 
+#: run release-build-linux inside the compose.yaml Alpine/musl container instead of on the host, for LINUX_ARCH (default amd64; e.g. `make release-linux-docker LINUX_ARCH=arm64`) -- each arch is its own compose service, pinned to a matching `platform:`, so the container's gcc always matches the arch it's targeting
+release-linux-docker:
+	$(call PROMPT, $@)
+	docker compose run --rm release-linux-$(LINUX_ARCH)
+
 #: remove build artifacts
 clean:
 	$(call PROMPT, $@)
-	rm -rf bin/ dist/
+	rm -rf bin/ dist/ out/
 
 #: regenerate procinfo/bpf's bpf2go bindings + compiled BPF objects (Linux + BTF + clang/llvm/libbpf-dev/bpftool only; not part of `build`/`all` since the toolchain isn't available on a normal macOS dev machine -- CI runs this explicitly before building on the Linux leg)
 bpf-generate:
