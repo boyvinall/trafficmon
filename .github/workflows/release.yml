@@ -50,7 +50,13 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: build --single-target --clean
+          install-only: true
+      - name: Build (Makefile)
+        if: runner.os != 'Windows'
+        run: make release-build
+      - name: Build (goreleaser)
+        if: runner.os == 'Windows'
+        run: goreleaser build --single-target --clean
       - name: Locate built binary
         id: bin
         shell: bash
@@ -111,9 +117,8 @@ jobs:
             set -e
             apk add --no-cache make gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash jq p7zip curl
             git config --global --add safe.directory /src
-            make bpf-generate
             curl -sL https://github.com/goreleaser/goreleaser/releases/download/v${GORELEASER_VERSION}/goreleaser_Linux_${{ matrix.goreleaser_arch }}.tar.gz | tar xz -C /usr/local/bin goreleaser
-            goreleaser build --single-target --clean --id trafficmon-linux
+            make release-build-linux
             bin=\$(jq -r '.[] | select(.type==\"Binary\") | .path' dist/artifacts.json)
             mkdir -p out
             cp \"\$bin\" trafficmon
