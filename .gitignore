@@ -11,6 +11,8 @@ dist/
 *.test
 *.out
 *.zip
+*.pprof
+/trafficmon
 
 # bpf2go-generated bindings + compiled BPF objects (see procinfo/bpf/*/gen_linux.go);
 # regenerate with `make bpf-generate`.

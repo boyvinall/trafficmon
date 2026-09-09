@@ -1,0 +1,45 @@
+# Builds the Linux release binary inside Alpine (musl): a static,
+# netgo-tagged binary compiled here carries no glibc symbol-versioning
+# floor and no libpcap.so runtime dependency, so it runs unmodified on any
+# Linux distro/kernel new enough for the syscalls it uses -- not just
+# whatever glibc happened to be on the build host.
+#
+# One service per target arch, each pinned to its own `platform:` -- this is
+# what makes `apk add gcc` install a gcc that actually matches GOARCH,
+# rather than whatever gcc the host's own architecture would otherwise
+# default the image to (cgo then hands that gcc a target-arch flag like
+# -m64 it may not even recognise).
+x-release-linux: &release-linux
+  build:
+    context: .
+    dockerfile: Dockerfile.linux-build
+  working_dir: /src
+  volumes:
+    - .:/src
+  entrypoint: sh
+  command:
+    - -c
+    - |
+      set -e
+      git config --global --add safe.directory /src
+      curl -sL "https://github.com/goreleaser/goreleaser/releases/download/v$${GORELEASER_VERSION}/goreleaser_Linux_$${GORELEASER_ARCH}.tar.gz" | tar xz -C /usr/local/bin goreleaser
+      make release-build-linux
+      bin=$$(jq -r '.[] | select(.type=="Binary") | .path' dist/artifacts.json)
+      mkdir -p out
+      cp "$$bin" trafficmon
+      7z a -tzip "out/trafficmon-linux-$${GOARCH}.zip" trafficmon
+
+services:
+  release-linux-amd64:
+    <<: *release-linux
+    platform: linux/amd64
+    environment:
+      GOARCH: amd64
+      GORELEASER_ARCH: x86_64
+
+  release-linux-arm64:
+    <<: *release-linux
+    platform: linux/arm64
+    environment:
+      GOARCH: arm64
+      GORELEASER_ARCH: arm64
