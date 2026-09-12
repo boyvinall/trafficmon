@@ -120,6 +120,21 @@ func (s *metricsState) buildMetrics(snap aggregate.Snapshot, now time.Time, cfg 
 
 	limiter := newPeerLimiter(cfg.MaxPeerCardinality)
 
+	s.addIOMetric(sm, snap, now, limiter)
+	s.addDNSQueryMetric(sm, snap, now)
+	s.addDNSErrorMetric(sm, snap, now)
+	s.addSYNMetric(sm, snap, now, limiter)
+	s.addRSTMetric(sm, snap, now, limiter)
+	addPacketsDroppedMetric(sm, snap, s.start, now)
+
+	return md
+}
+
+// addIOMetric appends the network.io cumulative sum, one data point pair
+// per connection under cfg.MaxPeerCardinality and a single overflow pair
+// for the rest, advancing s.lastIO/overflowBytesIn/overflowBytesOut in the
+// process.
+func (s *metricsState) addIOMetric(sm pmetric.ScopeMetrics, snap aggregate.Snapshot, now time.Time, limiter *peerLimiter) {
 	ioMetric := sm.Metrics().AppendEmpty()
 	ioMetric.SetName(metadata.MetricNetworkIO)
 	ioMetric.SetUnit("By")
@@ -160,152 +175,189 @@ func (s *metricsState) buildMetrics(snap aggregate.Snapshot, now time.Time, cfg 
 	if overflowed {
 		addOverflowIODataPoints(ioSum.DataPoints(), s.start, now, s.overflowBytesIn, s.overflowBytesOut)
 	}
+}
 
+// addDNSQueryMetric appends the dns.query.count cumulative sum, one data
+// point per distinct (name, qtype) seen in snap.DNSQueries this tick,
+// advancing s.dnsCounts in the process. A no-op when snap.DNSQueries is
+// empty, so a tick with no DNS traffic emits no metric at all.
+func (s *metricsState) addDNSQueryMetric(sm pmetric.ScopeMetrics, snap aggregate.Snapshot, now time.Time) {
 	for _, q := range snap.DNSQueries {
 		s.dnsCounts[dnsKey{name: q.Name, qtype: q.QType}]++
 	}
-	if len(snap.DNSQueries) > 0 {
-		dnsMetric := sm.Metrics().AppendEmpty()
-		dnsMetric.SetName(metadata.MetricDNSQueryCount)
-		dnsMetric.SetUnit("{query}")
-		dnsSum := dnsMetric.SetEmptySum()
-		dnsSum.SetIsMonotonic(true)
-		dnsSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
-
-		seen := make(map[dnsKey]struct{}, len(snap.DNSQueries))
-		for _, q := range snap.DNSQueries {
-			k := dnsKey{name: q.Name, qtype: q.QType}
-			if _, ok := seen[k]; ok {
-				continue
-			}
-			seen[k] = struct{}{}
-			dp := dnsSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(s.dnsCounts[k]))
-			dp.Attributes().PutStr("dns.question.name", k.name)
-			dp.Attributes().PutStr(metadata.AttrDNSQuestionType, k.qtype)
-		}
+	if len(snap.DNSQueries) == 0 {
+		return
 	}
 
+	dnsMetric := sm.Metrics().AppendEmpty()
+	dnsMetric.SetName(metadata.MetricDNSQueryCount)
+	dnsMetric.SetUnit("{query}")
+	dnsSum := dnsMetric.SetEmptySum()
+	dnsSum.SetIsMonotonic(true)
+	dnsSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+	seen := make(map[dnsKey]struct{}, len(snap.DNSQueries))
+	for _, q := range snap.DNSQueries {
+		k := dnsKey{name: q.Name, qtype: q.QType}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		dp := dnsSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(s.dnsCounts[k]))
+		dp.Attributes().PutStr("dns.question.name", k.name)
+		dp.Attributes().PutStr(metadata.AttrDNSQuestionType, k.qtype)
+	}
+}
+
+// addDNSErrorMetric appends the dns.query.errors cumulative sum, the same
+// per-tick-distinct-key shape addDNSQueryMetric uses, advancing
+// s.dnsErrorCounts in the process.
+func (s *metricsState) addDNSErrorMetric(sm pmetric.ScopeMetrics, snap aggregate.Snapshot, now time.Time) {
 	for _, e := range snap.DNSErrors {
 		s.dnsErrorCounts[dnsErrorKey{name: e.Name, qtype: e.QType, rcode: e.RCode}]++
 	}
-	if len(snap.DNSErrors) > 0 {
-		dnsErrMetric := sm.Metrics().AppendEmpty()
-		dnsErrMetric.SetName(metadata.MetricDNSQueryErrors)
-		dnsErrMetric.SetUnit("{query}")
-		dnsErrSum := dnsErrMetric.SetEmptySum()
-		dnsErrSum.SetIsMonotonic(true)
-		dnsErrSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
-
-		seen := make(map[dnsErrorKey]struct{}, len(snap.DNSErrors))
-		for _, e := range snap.DNSErrors {
-			k := dnsErrorKey{name: e.Name, qtype: e.QType, rcode: e.RCode}
-			if _, ok := seen[k]; ok {
-				continue
-			}
-			seen[k] = struct{}{}
-			dp := dnsErrSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(s.dnsErrorCounts[k]))
-			dp.Attributes().PutStr("dns.question.name", k.name)
-			dp.Attributes().PutStr(metadata.AttrDNSQuestionType, k.qtype)
-			dp.Attributes().PutStr(metadata.AttrDNSResponseCode, k.rcode)
-		}
+	if len(snap.DNSErrors) == 0 {
+		return
 	}
 
-	touchedSYN := make(map[synKey]struct{}, len(snap.SYNEvents))
+	dnsErrMetric := sm.Metrics().AppendEmpty()
+	dnsErrMetric.SetName(metadata.MetricDNSQueryErrors)
+	dnsErrMetric.SetUnit("{query}")
+	dnsErrSum := dnsErrMetric.SetEmptySum()
+	dnsErrSum.SetIsMonotonic(true)
+	dnsErrSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+	seen := make(map[dnsErrorKey]struct{}, len(snap.DNSErrors))
+	for _, e := range snap.DNSErrors {
+		k := dnsErrorKey{name: e.Name, qtype: e.QType, rcode: e.RCode}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		dp := dnsErrSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(s.dnsErrorCounts[k]))
+		dp.Attributes().PutStr("dns.question.name", k.name)
+		dp.Attributes().PutStr(metadata.AttrDNSQuestionType, k.qtype)
+		dp.Attributes().PutStr(metadata.AttrDNSResponseCode, k.rcode)
+	}
+}
+
+// addSYNMetric appends the network.syn.count cumulative sum, one data point
+// per (peer, iface) under cfg.MaxPeerCardinality touched this tick plus a
+// single overflow point for the rest, advancing s.synCounts/
+// synOverflowCount in the process.
+func (s *metricsState) addSYNMetric(sm pmetric.ScopeMetrics, snap aggregate.Snapshot, now time.Time, limiter *peerLimiter) {
+	touched := make(map[synKey]struct{}, len(snap.SYNEvents))
 	for _, ev := range snap.SYNEvents {
 		if limiter.allow(ev.RemoteAddr.String(), ev.RemotePort) {
 			k := synKey{addr: ev.RemoteAddr.String(), port: ev.RemotePort, iface: ev.Iface}
 			s.synCounts[k]++
-			touchedSYN[k] = struct{}{}
+			touched[k] = struct{}{}
 			continue
 		}
 		s.synOverflowCount++
 	}
-	if len(snap.SYNEvents) > 0 {
-		synMetric := sm.Metrics().AppendEmpty()
-		synMetric.SetName(metadata.MetricNetworkSYNCount)
-		synMetric.SetUnit("{attempt}")
-		synSum := synMetric.SetEmptySum()
-		synSum.SetIsMonotonic(true)
-		synSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
-
-		for k := range touchedSYN {
-			dp := synSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(s.synCounts[k]))
-			dp.Attributes().PutStr("network.peer.address", k.addr)
-			dp.Attributes().PutInt("network.peer.port", int64(k.port))
-			dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, k.iface)
-		}
-		if s.synOverflowCount > 0 {
-			dp := synSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(s.synOverflowCount))
-			dp.Attributes().PutBool(metadata.AttrPeerOverflow, true)
-		}
+	if len(snap.SYNEvents) == 0 {
+		return
 	}
 
-	touchedRST := make(map[rstKey]struct{}, len(snap.RSTEvents))
+	synMetric := sm.Metrics().AppendEmpty()
+	synMetric.SetName(metadata.MetricNetworkSYNCount)
+	synMetric.SetUnit("{attempt}")
+	synSum := synMetric.SetEmptySum()
+	synSum.SetIsMonotonic(true)
+	synSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+	for k := range touched {
+		dp := synSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(s.synCounts[k]))
+		dp.Attributes().PutStr("network.peer.address", k.addr)
+		dp.Attributes().PutInt("network.peer.port", int64(k.port))
+		dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, k.iface)
+	}
+	if s.synOverflowCount > 0 {
+		dp := synSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(s.synOverflowCount))
+		dp.Attributes().PutBool(metadata.AttrPeerOverflow, true)
+	}
+}
+
+// addRSTMetric appends the network.rst.count cumulative sum — the same
+// shape addSYNMetric uses, for RST rather than SYN packets — advancing
+// s.rstCounts/rstOverflowCount in the process.
+func (s *metricsState) addRSTMetric(sm pmetric.ScopeMetrics, snap aggregate.Snapshot, now time.Time, limiter *peerLimiter) {
+	touched := make(map[rstKey]struct{}, len(snap.RSTEvents))
 	for _, ev := range snap.RSTEvents {
 		if limiter.allow(ev.RemoteAddr.String(), ev.RemotePort) {
 			k := rstKey{addr: ev.RemoteAddr.String(), port: ev.RemotePort, iface: ev.Iface}
 			s.rstCounts[k]++
-			touchedRST[k] = struct{}{}
+			touched[k] = struct{}{}
 			continue
 		}
 		s.rstOverflowCount++
 	}
-	if len(snap.RSTEvents) > 0 {
-		rstMetric := sm.Metrics().AppendEmpty()
-		rstMetric.SetName(metadata.MetricNetworkRSTCount)
-		rstMetric.SetUnit("{reset}")
-		rstSum := rstMetric.SetEmptySum()
-		rstSum.SetIsMonotonic(true)
-		rstSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
-
-		for k := range touchedRST {
-			dp := rstSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(s.rstCounts[k]))
-			dp.Attributes().PutStr("network.peer.address", k.addr)
-			dp.Attributes().PutInt("network.peer.port", int64(k.port))
-			dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, k.iface)
-		}
-		if s.rstOverflowCount > 0 {
-			dp := rstSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(s.rstOverflowCount))
-			dp.Attributes().PutBool(metadata.AttrPeerOverflow, true)
-		}
+	if len(snap.RSTEvents) == 0 {
+		return
 	}
 
-	if len(snap.PacketStats) > 0 {
-		droppedMetric := sm.Metrics().AppendEmpty()
-		droppedMetric.SetName(metadata.MetricCapturePacketsDropped)
-		droppedMetric.SetUnit("{packet}")
-		droppedSum := droppedMetric.SetEmptySum()
-		droppedSum.SetIsMonotonic(true)
-		droppedSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	rstMetric := sm.Metrics().AppendEmpty()
+	rstMetric.SetName(metadata.MetricNetworkRSTCount)
+	rstMetric.SetUnit("{reset}")
+	rstSum := rstMetric.SetEmptySum()
+	rstSum.SetIsMonotonic(true)
+	rstSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 
-		for iface, stats := range snap.PacketStats {
-			dp := droppedSum.DataPoints().AppendEmpty()
-			dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
-			dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
-			dp.SetIntValue(int64(stats.Dropped))
-			dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, iface)
-		}
+	for k := range touched {
+		dp := rstSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(s.rstCounts[k]))
+		dp.Attributes().PutStr("network.peer.address", k.addr)
+		dp.Attributes().PutInt("network.peer.port", int64(k.port))
+		dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, k.iface)
+	}
+	if s.rstOverflowCount > 0 {
+		dp := rstSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(s.start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(s.rstOverflowCount))
+		dp.Attributes().PutBool(metadata.AttrPeerOverflow, true)
+	}
+}
+
+// addPacketsDroppedMetric appends the capture.packets.dropped cumulative
+// sum, one data point per interface reporting stats this tick. Unlike the
+// other metrics here, its value is already cumulative from
+// capture.PacketStats itself, so there is no receiver-side counter to
+// advance.
+func addPacketsDroppedMetric(sm pmetric.ScopeMetrics, snap aggregate.Snapshot, start, now time.Time) {
+	if len(snap.PacketStats) == 0 {
+		return
 	}
 
-	return md
+	droppedMetric := sm.Metrics().AppendEmpty()
+	droppedMetric.SetName(metadata.MetricCapturePacketsDropped)
+	droppedMetric.SetUnit("{packet}")
+	droppedSum := droppedMetric.SetEmptySum()
+	droppedSum.SetIsMonotonic(true)
+	droppedSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+	for iface, stats := range snap.PacketStats {
+		dp := droppedSum.DataPoints().AppendEmpty()
+		dp.SetStartTimestamp(pcommon.NewTimestampFromTime(start))
+		dp.SetTimestamp(pcommon.NewTimestampFromTime(now))
+		dp.SetIntValue(int64(stats.Dropped))
+		dp.Attributes().PutStr(metadata.AttrNetworkInterfaceName, iface)
+	}
 }
 
 // addIODataPoint appends one MetricNetworkIO transmit and one receive data

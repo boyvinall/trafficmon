@@ -1,0 +1,3 @@
+# Generated vendor headers (kernel BTF dump), never hand-edited.
+procinfo/bpf/headers/vmlinux.h
+procinfo/bpf/headers/vmlinux_amd64.h

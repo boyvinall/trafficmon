@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gopacket/gopacket"
-	"github.com/gopacket/gopacket/layers"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/boyvinall/trafficmon/capture/pcapdrv"
@@ -289,18 +288,7 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 			return err
 		}
 
-		if shouldSampleStats(lastStatsUpdate, time.Now(), statsSampleInterval) {
-			lastStatsUpdate = time.Now()
-			if stats, err := handle.Stats(); err == nil {
-				c.statsMu.Lock()
-				c.packetStats[iface] = PacketStats{
-					Received:  stats.PacketsReceived,
-					Dropped:   stats.PacketsDropped,
-					IfDropped: stats.PacketsIfDropped,
-				}
-				c.statsMu.Unlock()
-			}
-		}
+		lastStatsUpdate = c.maybeSampleStats(handle, iface, lastStatsUpdate)
 
 		// Zero-copy is safe here because everything kept from the packet —
 		// addresses, ports, lengths — is copied into values before the next
@@ -316,49 +304,78 @@ func (c *Capturer) captureOn(ctx context.Context, iface string, isLocal func(net
 			return fmt.Errorf("read from %s: %w", iface, err)
 		}
 
-		info, ok := dec.decode(data)
-		if !ok {
-			continue
-		}
-		key, inbound, ok := normalise(info.Src, info.Dst, info.SrcPort, info.DstPort, info.Proto, iface, isLocal)
-		if !ok {
-			continue
-		}
+		c.handlePacket(dec, iface, isLocal, data, ci)
+	}
+}
 
-		// libpcap timestamps come from the kernel at capture time, which is
-		// closer to when the bytes moved than any clock read here would be.
-		ts := ci.Timestamp
-		if ts.IsZero() {
-			ts = time.Now()
-		}
-		ctr := c.record(key, ts, info.Bytes, inbound)
-		c.inspect(data, info, inbound, dec.linkType, key.RemoteAddr, ctr, ts)
-		c.inspectPassive(data, info, dec.linkType, ts)
+// maybeSampleStats calls handle.Stats() and records the result if at least
+// statsSampleInterval has elapsed since last, returning the (possibly
+// updated) sample time for the next call to pass back in.
+func (c *Capturer) maybeSampleStats(handle pcapdrv.Handle, iface string, last time.Time) time.Time {
+	now := time.Now()
+	if !shouldSampleStats(last, now, statsSampleInterval) {
+		return last
+	}
 
-		if info.Proto == ProtoTCP && info.SYN && !info.ACK {
-			ev := SYNEvent{
-				Iface:      iface,
-				LocalAddr:  key.LocalAddr,
-				LocalPort:  key.LocalPort,
-				RemoteAddr: key.RemoteAddr,
-				RemotePort: key.RemotePort,
-				At:         ts,
-			}
-			c.synEvents.push(ev)
-			if c.logFeed != nil {
-				c.logFeed.sendSYN(ev)
-			}
+	if stats, err := handle.Stats(); err == nil {
+		c.statsMu.Lock()
+		c.packetStats[iface] = PacketStats{
+			Received:  stats.PacketsReceived,
+			Dropped:   stats.PacketsDropped,
+			IfDropped: stats.PacketsIfDropped,
 		}
-		if info.Proto == ProtoTCP && info.RST {
-			c.rstEvents.push(RSTEvent{
-				Iface:      iface,
-				LocalAddr:  key.LocalAddr,
-				LocalPort:  key.LocalPort,
-				RemoteAddr: key.RemoteAddr,
-				RemotePort: key.RemotePort,
-				At:         ts,
-			})
+		c.statsMu.Unlock()
+	}
+	return now
+}
+
+// handlePacket decodes one packet already read off handle and applies it to
+// the flow table, DPI, and the SYN/RST event rings. A packet the decoder
+// can't attribute to a flow (see flowDecoder.decode/normalise) is silently
+// dropped, the same as one that never reached this point.
+func (c *Capturer) handlePacket(dec *flowDecoder, iface string, isLocal func(netip.Addr) bool, data []byte, ci gopacket.CaptureInfo) {
+	info, ok := dec.decode(data)
+	if !ok {
+		return
+	}
+	key, inbound, ok := normalise(info, iface, isLocal)
+	if !ok {
+		return
+	}
+
+	// libpcap timestamps come from the kernel at capture time, which is
+	// closer to when the bytes moved than any clock read here would be.
+	ts := ci.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	ctr := c.record(key, ts, info.Bytes, inbound)
+	c.inspect(inspectInput{data: data, info: info, inbound: inbound, linkType: dec.linkType, ts: ts}, key.RemoteAddr, ctr)
+	c.inspectPassive(data, info, dec.linkType, ts)
+
+	if info.Proto == ProtoTCP && info.SYN && !info.ACK {
+		ev := SYNEvent{
+			Iface:      iface,
+			LocalAddr:  key.LocalAddr,
+			LocalPort:  key.LocalPort,
+			RemoteAddr: key.RemoteAddr,
+			RemotePort: key.RemotePort,
+			At:         ts,
 		}
+		c.synEvents.push(ev)
+		if c.logFeed != nil {
+			c.logFeed.sendSYN(ev)
+		}
+	}
+	if info.Proto == ProtoTCP && info.RST {
+		c.rstEvents.push(RSTEvent{
+			Iface:      iface,
+			LocalAddr:  key.LocalAddr,
+			LocalPort:  key.LocalPort,
+			RemoteAddr: key.RemoteAddr,
+			RemotePort: key.RemotePort,
+			At:         ts,
+		})
 	}
 }
 
@@ -390,209 +407,6 @@ func (c *Capturer) record(key FlowKey, ts time.Time, n uint64, inbound bool) *By
 
 	ctr.Add(ts, n, inbound)
 	return ctr
-}
-
-// inspect runs the configured Inspectors against one packet already
-// attributed to ctr's flow, stopping at the first one willing to look. It is
-// a no-op once ctr no longer needs inspection (see
-// ByteCounter.NeedsHostnameInspection). A flow whose ClientHello spans more
-// than one segment stays under inspection across several calls — see
-// ByteCounter.AddHelloSegment — but is still bounded to one overall attempt:
-// once that reassembly finishes or gives up, later packets on the same flow
-// are never re-parsed.
-//
-// A fresh (non-continuation) candidate's payload is extracted up front,
-// before any Inspector's Candidate runs, so Candidate can recognise a
-// protocol from its own leading bytes instead of assuming a well-known
-// port — but only once DatagramLen alone (no extraction needed) has ruled
-// out a header-only TCP segment. If no Inspector accepts that first
-// extracted payload, the flow's one-shot budget is spent right there rather
-// than re-extracting every later packet: a genuine ClientHello (or QUIC
-// Initial) is always the first payload-bearing packet a fresh connection
-// carries, so this is what keeps a long-lived flow that is never TLS or
-// QUIC at all (a plain HTTP download, an SSH session) from paying an
-// extraction cost for its whole life instead of just once.
-//
-// A UDP candidate (QUIC's Initial packet) skips reassembly entirely: one
-// datagram is already a complete unit, so it is inspected directly and the
-// flow is marked attempted either way, hit or miss, with no continuation
-// state to track.
-//
-// Only the first Inspector in c.cfg.Inspectors whose Candidate accepts a
-// given packet is asked: a later one that would also have accepted the same
-// packet never gets a look, hit or miss. This holds today because no two
-// configured Inspectors' Candidate implementations overlap (see
-// DefaultInspectors), but it means combining Inspectors whose candidates do
-// overlap is not supported without changing this function.
-//
-// data is the same zero-copy buffer the capture loop just read; it is used
-// here and only here, before the loop's next ZeroCopyReadPacketData call
-// invalidates it. extractPayload builds its gopacket.Packet directly over
-// data with gopacket.NoCopy, so nothing here copies it — the one copy that
-// does happen is each segment's payload going into the flow's
-// dpi.HelloAssembler, which has to outlive the next read.
-func (c *Capturer) inspect(data []byte, info packetInfo, inbound bool, linkType layers.LinkType, remote netip.Addr, ctr *ByteCounter, ts time.Time) {
-	if len(c.cfg.Inspectors) == 0 || !ctr.NeedsHostnameInspection() {
-		return
-	}
-
-	cand := dpi.CandidatePacket{
-		IsTCP:       info.Proto == ProtoTCP,
-		SrcPort:     info.SrcPort,
-		DstPort:     info.DstPort,
-		Outbound:    !inbound,
-		DatagramLen: int(info.Bytes),
-	}
-
-	inProgress := cand.IsTCP && ctr.HelloInProgress()
-	// A continuation must go back to the same inspector that started the
-	// reassembly — not just any inspector willing to look — so a second
-	// TCP-capable Inspector in the list can never hijack another one's
-	// in-progress hello.
-	wantInspector := ""
-	if inProgress {
-		wantInspector = ctr.HelloInspector()
-	}
-
-	if !inProgress && cand.IsTCP && cand.DatagramLen <= minPayloadDatagramLen {
-		return // header-only TCP segment (SYN, bare ACK, FIN): nothing to extract
-	}
-
-	seq, payload, ok := extractPayload(data, linkType, cand.IsTCP)
-	if !ok {
-		if inProgress {
-			ctr.MarkHostnameAttempted()
-		}
-		return
-	}
-	cand.Payload = payload
-
-	for _, insp := range c.cfg.Inspectors {
-		switch {
-		case inProgress:
-			if !cand.Outbound || insp.Name() != wantInspector {
-				continue // a continuation only cares about this flow's own outbound bytes, on its own inspector
-			}
-		case !insp.Candidate(cand):
-			continue
-		}
-
-		if !cand.IsTCP {
-			// A single datagram, already complete: no reassembly, no
-			// continuation across further calls.
-			ctr.MarkHostnameAttempted()
-			if host, ok := insp.Inspect(payload); ok {
-				ctr.SetHostname(host)
-				c.hostnameCache.Put(remote.String(), host, ts)
-			}
-			return
-		}
-
-		ready, done := ctr.AddHelloSegment(insp.Name(), seq, payload)
-		if ready != nil {
-			if host, ok := insp.Inspect(ready); ok {
-				ctr.SetHostname(host)
-				c.hostnameCache.Put(remote.String(), host, ts)
-			}
-		}
-		// A candidate packet was examined either way: don't keep retrying
-		// this flow once reassembly is done, found a hostname or not.
-		if done {
-			ctr.MarkHostnameAttempted()
-		}
-		return
-	}
-
-	// A fresh candidate's payload was examined (via Candidate, above) and no
-	// Inspector wanted it: this flow's opening payload-bearing packet is
-	// never coming back, so there is nothing left to gain by asking again on
-	// its next packet.
-	if !inProgress {
-		ctr.MarkHostnameAttempted()
-	}
-}
-
-// inspectPassive runs the configured PassiveInspectors against every
-// packet, independent of any flow's own hostname state — a DNS resolver
-// flow keeps carrying new, unrelated query/response pairs for its whole
-// life, unlike a single ClientHello. Candidate keeps this cheap for every
-// packet that isn't DNS.
-func (c *Capturer) inspectPassive(data []byte, info packetInfo, linkType layers.LinkType, ts time.Time) {
-	if len(c.cfg.PassiveInspectors) == 0 {
-		return
-	}
-
-	cand := dpi.CandidatePacket{
-		IsTCP:       info.Proto == ProtoTCP,
-		SrcPort:     info.SrcPort,
-		DstPort:     info.DstPort,
-		DatagramLen: int(info.Bytes),
-	}
-
-	for _, insp := range c.cfg.PassiveInspectors {
-		if !insp.Candidate(cand) {
-			continue
-		}
-
-		_, payload, ok := extractPayload(data, linkType, cand.IsTCP)
-		if !ok {
-			continue
-		}
-		if cand.IsTCP {
-			// DNS-over-TCP prefixes each message with its own 2-byte length;
-			// strip it so Inspect always sees one bare message, the same as
-			// the UDP case.
-			if len(payload) < 2 {
-				continue
-			}
-			payload = payload[2:]
-		}
-
-		for _, f := range insp.Inspect(payload) {
-			c.hostnameCache.Put(f.IP, f.Hostname, ts)
-		}
-		if qi, ok := insp.(dpi.QueryPassiveInspector); ok {
-			for _, f := range qi.InspectQuery(payload, info.Src.String(), info.Dst.String(), ts) {
-				c.dnsQueries.push(f)
-				if c.logFeed != nil {
-					c.logFeed.sendDNSQuery(f)
-				}
-			}
-		}
-		if ei, ok := insp.(dpi.ErrorPassiveInspector); ok {
-			for _, f := range ei.InspectError(payload, info.Src.String(), ts) {
-				c.dnsErrors.push(f)
-			}
-		}
-		if ai, ok := insp.(dpi.AnswerPassiveInspector); ok {
-			for _, f := range ai.InspectAnswer(payload, info.Src.String(), ts) {
-				c.dnsAnswers.push(f)
-			}
-		}
-	}
-}
-
-// extractPayload decodes data with the stock gopacket TCP/UDP decoder — not
-// the fast transportPorts path flowDecoder uses for every packet, see
-// decode.go — to recover the application-layer payload (and, for TCP, the
-// sequence number hello reassembly needs). It is only called for packets
-// that already passed Candidate or belong to a flow already mid reassembly,
-// so this second decode's cost stays bounded to a handful of packets per new
-// connection.
-func extractPayload(data []byte, linkType layers.LinkType, isTCP bool) (seq uint32, payload []byte, ok bool) {
-	packet := gopacket.NewPacket(data, linkType, gopacket.NoCopy)
-	if isTCP {
-		tcp, isTCP := packet.Layer(layers.LayerTypeTCP).(*layers.TCP)
-		if !isTCP {
-			return 0, nil, false
-		}
-		return tcp.Seq, tcp.LayerPayload(), true
-	}
-	udp, isUDP := packet.Layer(layers.LayerTypeUDP).(*layers.UDP)
-	if !isUDP {
-		return 0, nil, false
-	}
-	return 0, udp.LayerPayload(), true
 }
 
 // Evict drops every flow last seen before the cutoff, except any in keep, and
