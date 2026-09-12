@@ -260,28 +260,28 @@ func (c *ByteCounter) HelloInspector() string {
 // iface is the interface the packet was captured on, carried straight onto
 // the resulting key. It reports whether the packet was inbound, and whether
 // it could be attributed at all.
-func normalise(src, dst netip.Addr, srcPort, dstPort uint16, proto Proto, iface string, isLocal func(netip.Addr) bool) (key FlowKey, inbound, ok bool) {
+func normalise(info packetInfo, iface string, isLocal func(netip.Addr) bool) (key FlowKey, inbound, ok bool) {
 	switch {
-	case isLocal(src):
+	case isLocal(info.Src):
 		// Source-local is tested first so that loopback traffic, where both
 		// ends are ours, lands on one row per local port rather than being
 		// counted once at each end of the same connection.
 		return FlowKey{
-			LocalAddr:  src,
-			LocalPort:  srcPort,
-			RemoteAddr: dst,
-			RemotePort: dstPort,
-			Proto:      proto,
+			LocalAddr:  info.Src,
+			LocalPort:  info.SrcPort,
+			RemoteAddr: info.Dst,
+			RemotePort: info.DstPort,
+			Proto:      info.Proto,
 			Iface:      iface,
 		}, false, true
 
-	case isLocal(dst):
+	case isLocal(info.Dst):
 		return FlowKey{
-			LocalAddr:  dst,
-			LocalPort:  dstPort,
-			RemoteAddr: src,
-			RemotePort: srcPort,
-			Proto:      proto,
+			LocalAddr:  info.Dst,
+			LocalPort:  info.DstPort,
+			RemoteAddr: info.Src,
+			RemotePort: info.SrcPort,
+			Proto:      info.Proto,
 			Iface:      iface,
 		}, true, true
 

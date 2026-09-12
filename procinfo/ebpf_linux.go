@@ -1,10 +1,5 @@
 //go:build linux
 
-// Package procinfo (this file): the eBPF-backed ConnectionSource for Linux,
-// replacing Poller's periodic /proc walk with a live event stream off
-// tcp_v4_connect/tcp_v6_connect and the inet_sock_set_state tracepoint. See
-// procinfo/bpf/{fentry,kprobe,sockstate} for the bpf2go-generated programs
-// it loads.
 package procinfo
 
 import (

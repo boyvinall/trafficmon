@@ -345,6 +345,27 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 	records := make(map[connKey]ConnectionRecord, len(conns))
 	seen := make(map[connKey]bool, len(conns))
 
+	a.joinConnections(conns, flows, now, records, seen)
+	a.joinUnattributedFlows(flows, now, records, seen)
+	a.carryForwardVanished(now, records, seen)
+
+	// Replacing the map wholesale, rather than patching it, is what stops a
+	// connection past its grace period lingering as a record forever.
+	a.records = records
+
+	list := make([]ConnectionRecord, 0, len(records))
+	for _, r := range records {
+		list = append(list, r)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].less(list[j]) })
+
+	return Snapshot{At: now, Connections: list}
+}
+
+// joinConnections fills records with one ConnectionRecord per procinfo
+// connection, joined against flows for its byte counters, and marks each
+// one's key seen. Called with a.mu already held.
+func (a *Aggregator) joinConnections(conns []procinfo.Connection, flows map[capture.FlowKey]capture.FlowStats, now time.Time, records map[connKey]ConnectionRecord, seen map[connKey]bool) {
 	// procinfo's socket enumeration has no notion of which interface a
 	// connection's traffic crosses, so flowKey below can never set FlowKey's
 	// Iface field. Index flows the same way, stripped of their own Iface, so
@@ -402,12 +423,16 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 
 		records[key] = rec
 	}
+}
 
-	// ICMP and ARP flows have no socket for procinfo to have enumerated, so
-	// they never appear in conns above. They still deserve a row — just one
-	// with no PID/process — so pick them out of the capture flows directly.
-	// A key built here can never collide with one built from conns, since
-	// procinfo.Connection.Proto is always "tcp" or "udp".
+// joinUnattributedFlows adds a ConnectionRecord for every ICMP/ARP flow.
+// Neither has a socket for procinfo to have enumerated, so they never
+// appear in conns — they still deserve a row, just one with no
+// PID/process, picked out of the capture flows directly. A key built here
+// can never collide with one joinConnections built, since
+// procinfo.Connection.Proto is always "tcp" or "udp". Called with a.mu
+// already held.
+func (a *Aggregator) joinUnattributedFlows(flows map[capture.FlowKey]capture.FlowStats, now time.Time, records map[connKey]ConnectionRecord, seen map[connKey]bool) {
 	for fk, st := range flows {
 		if fk.Proto != capture.ProtoICMP && fk.Proto != capture.ProtoARP {
 			continue
@@ -445,9 +470,12 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 			FirstSeen:     firstSeen,
 		}
 	}
+}
 
-	// Carry forward anything the current poll missed, as long as it is
-	// still within its grace period.
+// carryForwardVanished copies into records anything a.records held that the
+// current poll missed (not in seen), as long as it is still within its
+// grace period, marking it Vanished. Called with a.mu already held.
+func (a *Aggregator) carryForwardVanished(now time.Time, records map[connKey]ConnectionRecord, seen map[connKey]bool) {
 	cutoff := now.Add(-GracePeriod)
 	for key, prev := range a.records {
 		if seen[key] || prev.LastPolled.Before(cutoff) {
@@ -456,18 +484,6 @@ func (a *Aggregator) join(conns []procinfo.Connection, flows map[capture.FlowKey
 		prev.Vanished = true
 		records[key] = prev
 	}
-
-	// Replacing the map wholesale, rather than patching it, is what stops a
-	// connection past its grace period lingering as a record forever.
-	a.records = records
-
-	list := make([]ConnectionRecord, 0, len(records))
-	for _, r := range records {
-		list = append(list, r)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].less(list[j]) })
-
-	return Snapshot{At: now, Connections: list}
 }
 
 // protoFromString converts a procinfo/aggregate proto string ("tcp"/"udp")

@@ -207,7 +207,7 @@ func TestNormalise(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key, inbound, ok := normalise(tt.src, tt.dst, tt.sport, tt.dport, tt.proto, "eth0", isLocal)
+			key, inbound, ok := normalise(packetInfo{Src: tt.src, Dst: tt.dst, SrcPort: tt.sport, DstPort: tt.dport, Proto: tt.proto}, "eth0", isLocal)
 			if ok != tt.wantOK {
 				t.Fatalf("normalise() ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -229,11 +229,11 @@ func TestNormaliseIsDirectionSymmetric(t *testing.T) {
 	remote := mustAddr(t, "93.184.216.34")
 	isLocal := func(a netip.Addr) bool { return a == local }
 
-	out, outInbound, ok := normalise(local, remote, 40000, 80, ProtoTCP, "eth0", isLocal)
+	out, outInbound, ok := normalise(packetInfo{Src: local, Dst: remote, SrcPort: 40000, DstPort: 80, Proto: ProtoTCP}, "eth0", isLocal)
 	if !ok {
 		t.Fatal("normalise() dropped an outbound packet")
 	}
-	in, inInbound, ok := normalise(remote, local, 80, 40000, ProtoTCP, "eth0", isLocal)
+	in, inInbound, ok := normalise(packetInfo{Src: remote, Dst: local, SrcPort: 80, DstPort: 40000, Proto: ProtoTCP}, "eth0", isLocal)
 	if !ok {
 		t.Fatal("normalise() dropped an inbound packet")
 	}
@@ -255,11 +255,11 @@ func TestFlowKeyIfaceDifferentiatesOtherwiseIdenticalFlows(t *testing.T) {
 	remote := mustAddr(t, "127.0.0.1")
 	isLocal := func(a netip.Addr) bool { return a == local }
 
-	primary, _, ok := normalise(local, remote, 51000, 8080, ProtoTCP, "en0", isLocal)
+	primary, _, ok := normalise(packetInfo{Src: local, Dst: remote, SrcPort: 51000, DstPort: 8080, Proto: ProtoTCP}, "en0", isLocal)
 	if !ok {
 		t.Fatal("normalise() dropped a packet it should have kept")
 	}
-	loopback, _, ok := normalise(local, remote, 51000, 8080, ProtoTCP, "lo0", isLocal)
+	loopback, _, ok := normalise(packetInfo{Src: local, Dst: remote, SrcPort: 51000, DstPort: 8080, Proto: ProtoTCP}, "lo0", isLocal)
 	if !ok {
 		t.Fatal("normalise() dropped a packet it should have kept")
 	}

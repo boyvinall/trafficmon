@@ -5,6 +5,7 @@
 !.claude
 !.golangci.yml
 !.goreleaser.yaml
+!.aislopignore
 
 bin/
 dist/
