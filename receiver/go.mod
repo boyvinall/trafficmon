@@ -3,7 +3,7 @@ module github.com/boyvinall/trafficmon/receiver
 go 1.22.0
 
 require (
-	github.com/boyvinall/trafficmon v0.0.0
+	github.com/boyvinall/trafficmon v0.4.2-0.20260912081029-da427d514a7b
 	go.opentelemetry.io/collector/component v0.119.0
 	go.opentelemetry.io/collector/component/componenttest v0.119.0
 	go.opentelemetry.io/collector/consumer v1.25.0
@@ -50,7 +50,4 @@ require (
 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
 )
 
-replace (
-	github.com/boyvinall/trafficmon => ..
-	github.com/dreadl0ck/tlsx => github.com/boyvinall/tlsx v1.1.1-go1.22
-)
+replace github.com/dreadl0ck/tlsx => github.com/boyvinall/tlsx v1.1.1-go1.22
