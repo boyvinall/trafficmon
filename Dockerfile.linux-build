@@ -4,7 +4,7 @@
 # distro/kernel new enough for the syscalls it uses.
 FROM golang:1.22-alpine
 
-RUN apk add --no-cache make gcc musl-dev libpcap-dev clang llvm libbpf-dev git bash jq p7zip curl
+RUN apk add --no-cache make gcc musl-dev libpcap-dev git bash jq p7zip curl
 
 WORKDIR /src
 

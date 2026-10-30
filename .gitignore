@@ -15,12 +15,6 @@ dist/
 *.pprof
 /trafficmon
 
-# bpf2go-generated bindings + compiled BPF objects (see procinfo/bpf/*/gen_linux.go);
-# regenerate with `make bpf-generate`.
-procinfo/bpf/**/*_bpfel.go
-procinfo/bpf/**/*_bpfeb.go
-procinfo/bpf/**/*.o
-
 # ocb-generated collector distribution sources (go.mod/go.sum, components.go,
 # main*.go); regenerate with `make build-otel-collector`.
 cmd/otel-collector/go.mod

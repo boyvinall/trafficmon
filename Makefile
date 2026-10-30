@@ -16,7 +16,7 @@ LINUX_ARCH ?= amd64
 # other build, including local ones, passes --snapshot.
 GORELEASER_SNAPSHOT_FLAG := $(if $(filter tag,$(GITHUB_REF_TYPE)),,--snapshot)
 
-.PHONY: help all build lint test clean run bpf-generate generate-otel-collector build-otel-collector release-build release-build-linux release-linux-docker
+.PHONY: help all build lint test clean run bpf-generate bpf-generate-docker generate-otel-collector build-otel-collector release-build release-build-linux release-linux-docker
 
 define PROMPT
 	@echo
@@ -66,8 +66,8 @@ release-build:
 	$(call PROMPT, $@)
 	goreleaser build --single-target --clean $(GORELEASER_SNAPSHOT_FLAG)
 
-#: statically-linked linux release variant (netgo + static libpcap) via goreleaser; run inside an Alpine/musl container so the binary carries no glibc symbol-versioning floor -- regenerates eBPF bindings first
-release-build-linux: bpf-generate
+#: statically-linked linux release variant (netgo + static libpcap) via goreleaser; run inside an Alpine/musl container so the binary carries no glibc symbol-versioning floor
+release-build-linux:
 	$(call PROMPT, $@)
 	goreleaser build --single-target --clean --id trafficmon-linux $(GORELEASER_SNAPSHOT_FLAG)
 
@@ -81,10 +81,16 @@ clean:
 	$(call PROMPT, $@)
 	rm -rf bin/ dist/ out/
 
-#: regenerate procinfo/bpf's bpf2go bindings + compiled BPF objects (Linux + BTF + clang/llvm/libbpf-dev/bpftool only; not part of `build`/`all` since the toolchain isn't available on a normal macOS dev machine -- CI runs this explicitly before building on the Linux leg)
+#: regenerate procinfo/bpf's bpf2go bindings + compiled BPF objects with the host's clang/llvm/libbpf-dev (prefer bpf-generate-docker, which uses the pinned toolchain)
 bpf-generate:
 	$(call PROMPT, $@)
 	go generate ./procinfo/bpf/...
+
+#: regenerate procinfo/bpf's committed bindings + objects inside the pinned toolchain image (Dockerfile.bpf-generate), always linux/amd64 so output is identical on every host; this is the only way the committed files should be produced
+bpf-generate-docker:
+	$(call PROMPT, $@)
+	docker build --platform linux/amd64 -t trafficmon-bpf-generate -f Dockerfile.bpf-generate .
+	docker run --rm --platform linux/amd64 -v "$$PWD":/src -w /src trafficmon-bpf-generate make bpf-generate
 
 #: print Makefile targets and short descriptions
 help:
