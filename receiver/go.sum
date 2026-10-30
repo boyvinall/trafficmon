@@ -1,7 +1,7 @@
 github.com/boyvinall/tlsx v1.1.1-go1.22 h1:WrcmRL5HTk13lTol24Tv/9tJyYVxCdZdG2xF4Y5+aRc=
 github.com/boyvinall/tlsx v1.1.1-go1.22/go.mod h1:RsRgmahcFyxNkVA4o0N3t51g0qFCH2tm4ezZhuHiUO0=
-github.com/boyvinall/trafficmon v0.4.2-0.20260912081029-da427d514a7b h1:WeRsmHF4jWSsycbJRshNZ9Mao/YCxu1eGkVWP2wfQbA=
-github.com/boyvinall/trafficmon v0.4.2-0.20260912081029-da427d514a7b/go.mod h1:vg/AmASESKoGK2MIJshrE5Im6xwmoSejURK3pFTLwE8=
+github.com/boyvinall/trafficmon v0.4.2-0.20261030192042-db530da36220 h1:IcOLWpFAgzNSKnAv+mOPUIvO8JRWReAaYcxHCTytvKg=
+github.com/boyvinall/trafficmon v0.4.2-0.20261030192042-db530da36220/go.mod h1:vg/AmASESKoGK2MIJshrE5Im6xwmoSejURK3pFTLwE8=
 github.com/cilium/ebpf v0.17.3 h1:FnP4r16PWYSE4ux6zN+//jMcW4nMVRvuTLVTvCjyyjg=
 github.com/cilium/ebpf v0.17.3/go.mod h1:G5EDHij8yiLzaqn0WjyfJHvRa+3aDlReIaLVRMvOyJk=
 github.com/cuonglm/quicsni v0.0.3 h1:aPGB4NGe9ReKeR7Lw0JGtsc2K747jw7T/K0S0racQ9w=

@@ -3,7 +3,7 @@ module github.com/boyvinall/trafficmon/receiver
 go 1.22.0
 
 require (
-	github.com/boyvinall/trafficmon v0.4.2-0.20260912081029-da427d514a7b
+	github.com/boyvinall/trafficmon v0.4.2-0.20261030192042-db530da36220
 	go.opentelemetry.io/collector/component v0.119.0
 	go.opentelemetry.io/collector/component/componenttest v0.119.0
 	go.opentelemetry.io/collector/consumer v1.25.0
