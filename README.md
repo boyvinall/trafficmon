@@ -1,6 +1,6 @@
 # trafficmon
 
-A `netstat`-style TUI for macOS and Linux: every currently open connection —
+A `netstat`-style TUI for macOS, Linux and Windows: every currently open connection —
 local and remote address, protocol, owning process and PID, and (for TCP) the
 kernel's connection state — whether or not it has carried any traffic.
 Bandwidth, where capture has counters for it, is joined onto the same row.
@@ -14,7 +14,7 @@ socket to enumerate, so those rows come from capture alone and carry no PID.
 
 ## Requirements
 
-- macOS or Linux
+- macOS, Linux or Windows
 - Go 1.22+
 - On macOS: Xcode Command Line Tools (`xcode-select --install`) — the
   `procinfo` package uses cgo to bind `libproc`; `libpcap` ships with macOS
@@ -22,6 +22,8 @@ socket to enumerate, so those rows come from capture alone and carry no PID.
   **build**; released binaries link libpcap in statically, so it's not a
   runtime dependency. Socket enumeration is pure Go, parsing `/proc`
   directly
+- On Windows: [Npcap](https://npcap.com) installed (the `wpcap.dll` it
+  provides is loaded at runtime). No cgo or C toolchain is needed to build
 
 ## Build and run
 
@@ -32,7 +34,9 @@ sudo ./bin/trafficmon
 
 Root is required for the same reasons `iftop` and `nettop` require it: opening
 a live pcap handle, and reading other processes' socket fd info (via `libproc`
-on macOS, `/proc` on Linux).
+on macOS, `/proc` on Linux). On Windows, run from an elevated prompt
+(Administrator) instead; `make` and `sudo` aren't assumed there, so build with
+`go build ./cmd/trafficmon` from the `cmd/trafficmon` directory.
 
 ### Flags
 
@@ -61,7 +65,7 @@ on macOS, `/proc` on Linux).
 | Package | Role |
 |---------|------|
 | `capture/` | gopacket/libpcap live capture, flow keys, rate windowing |
-| `procinfo/` | per-OS open-socket enumeration incl. TCP state (cgo `libproc` on macOS, `/proc` parsing on Linux) |
+| `procinfo/` | per-OS open-socket enumeration incl. TCP state (cgo `libproc` on macOS, `/proc` parsing on Linux, Win32 APIs on Windows) |
 | `dpi/` | pluggable deep-packet inspection: TLS/QUIC ClientHello SNI, plus DNS-answer and DNS-query inspectors |
 | `aggregate/` | mutex-protected shared state, traffic join, per-grouping rollups |
 | `dns/` | async reverse DNS with an aggressive cache |
