@@ -85,7 +85,7 @@ jobs:
   # unmodified on any Linux distro/kernel new enough for the syscalls it
   # uses -- not just whatever glibc happened to be on the build host.
   #
-  # The build itself (make bpf-generate + goreleaser) runs via `docker
+  # The build itself (goreleaser) runs via `docker
   # compose run` against the Alpine image defined in compose.yaml, not the
   # `container:` job key: the GitHub Actions runner cannot execute any
   # JS-based action (actions/checkout, goreleaser-action) inside an Alpine

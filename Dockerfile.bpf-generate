@@ -1,0 +1,13 @@
+# Pinned toolchain for regenerating procinfo/bpf's bpf2go bindings and BPF
+# objects. The generated files are committed, so every regeneration must use
+# this exact image digest, clang and libbpf headers to keep the output
+# byte-for-byte reproducible; run it via `make bpf-generate-docker`.
+FROM golang:1.22-bookworm@sha256:3d699e4d15d0f8f13c9195c0632a16702b8cbdece2955af1c23b37ae5d55a253
+
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends clang-14=1:14.0.6-12 llvm-14=1:14.0.6-12 libbpf-dev=1:1.1.2-0+deb12u1 \
+ && ln -s /usr/bin/clang-14 /usr/local/bin/clang \
+ && ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
